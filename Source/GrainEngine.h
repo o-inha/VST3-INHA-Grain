@@ -15,11 +15,17 @@ struct Parameters
     float thresholdDb = -24.0f;
     float scatterMs = 2000.0f;
     float grainMinMs = 200.0f, grainMaxMs = 1000.0f;
+    int mass = 1;
+    float panMinPercent = 0.0f, panMaxPercent = 0.0f;
+    // The adapter expands these bounds for tempo-synchronized durations.
+    float durationMinimumMs = 40.0f, durationMaximumMs = 6000.0f;
+    bool synced = false;
+    float tempoBpm = 120.0f;
     float envMinPercent = 0.0f, envMaxPercent = 50.0f;
     float undulationMinPercent = 0.0f, undulationMaxPercent = 50.0f;
     float speedMinPercent = 50.0f, speedMaxPercent = 200.0f;
     float attackMinMs = 500.0f, attackMaxMs = 1000.0f;
-    float releaseMinMs = 800.0f, releaseMaxMs = 10000.0f;
+    float releaseMinMs = 800.0f, releaseMaxMs = 6000.0f;
     float duckDryPercent = 90.0f, duckPreviousPercent = 90.0f;
     float dryDb = 0.0f, wetDb = 0.0f;
     std::uint32_t seed = 254743703u;
@@ -36,7 +42,8 @@ class GrainEngine
 {
 public:
     static constexpr std::size_t maxEvents = 6;
-    static constexpr std::size_t maxGrainsPerEvent = 24;
+    static constexpr std::size_t maxStreams = 8;
+    static constexpr std::size_t maxGrainsPerEvent = 64;
 
     void prepare (double sampleRate);
     void reset (std::int64_t timelineSample = 0) noexcept;
@@ -55,7 +62,8 @@ private:
         bool active = false;
         std::uint32_t age = 0, duration = 0;
         std::uint64_t begin = 0;
-        std::uint32_t period = 1, crossfade = 0, position = 0;
+        std::uint32_t position = 0;
+        float leftGain = 1.0f, rightGain = 1.0f;
         std::uint16_t curve = 0;
         float curveMix = 0.0f;
     };
@@ -66,8 +74,10 @@ private:
         std::uint64_t key = 0, written = 0, grainSerial = 0;
         std::uint64_t age = 0, attack = 1, release = 1, releaseAge = 0;
         std::uint64_t captureLimit = 1;
-        std::uint32_t previousGrain = 0;
-        std::int64_t nextGrain = 0;
+        std::array<std::uint32_t, maxStreams> previousGrain {};
+        std::array<std::int64_t, maxStreams> nextGrain {};
+        std::uint64_t audioStart = 0;
+        bool audioStarted = false;
         float releaseStart = 1.0f, envelope = 0.0f;
         float undulation = 0.0f, speed = 1.0f;
         float grainQuantile = 0.0f;
@@ -106,7 +116,7 @@ private:
     void retire (Event&, double milliseconds) noexcept;
     Event* startEvent (bool live, bool held, std::uint64_t ordinal) noexcept;
     void startRelease (Event&) noexcept;
-    void launchGrain (Event&) noexcept;
+    void launchGrain (Event&, std::size_t stream) noexcept;
     std::array<float, 2> renderEvent (Event&) noexcept;
     float grainWindow (const Grain&) const noexcept;
     float readSample (const Event&, std::uint64_t frame, unsigned channel) const noexcept;

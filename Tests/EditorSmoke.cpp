@@ -338,7 +338,7 @@ Capture capture (const Editor& editor)
 
 void checkRendered (const Capture& image)
 {
-    require (image.width >= 524 && image.height >= 366, "Unexpected editor dimensions");
+    require (image.width >= 500 && image.height >= 366, "Unexpected editor dimensions");
     std::size_t visible = 0, transitions = 0;
     for (std::size_t i=1; i<image.pixels.size(); ++i)
     {
@@ -386,7 +386,7 @@ void clickMotionTab(Editor& editor,bool sway)
     const auto image=capture(editor);
     const auto panel=image.logicalPixel(26,203);
     const auto und=image.logicalPixel(26,180);
-    const auto sw=image.logicalPixel(198,180);
+    const auto sw=image.logicalPixel(180,180);
     require((sway?sw:und)==panel,"Active motion tab does not share its attached panel background");
     require((sway?und:sw)!=panel,"Inactive motion tab did not use the plugin background");
 }
@@ -405,12 +405,12 @@ void motionControlBanks(Editor& editor,const std::filesystem::path& directory)
     clickMotionTab(editor,true);
     const auto swayAmount=std::array<double,2>{motionValue(editor,25),motionValue(editor,26)};
     const auto swaySpeed=std::array<double,2>{motionValue(editor,27),motionValue(editor,28)};
-    editor.dragAt(66,253,235);
+    editor.dragAt(61,253,235);
     require(motionValue(editor,25)!=swayAmount[0]||motionValue(editor,26)!=swayAmount[1],
             "SWAY AMOUNT knob did not edit its own parameter bank");
     require(motionValue(editor,9)==undAmount[0]&&motionValue(editor,10)==undAmount[1],
             "SWAY AMOUNT drag changed the inactive UNDULATION values");
-    editor.dragAt(156,253,235);
+    editor.dragAt(143,253,235);
     require(motionValue(editor,27)!=swaySpeed[0]||motionValue(editor,28)!=swaySpeed[1],
             "SWAY SPEED knob did not edit its own millisecond parameter bank");
     require(motionValue(editor,11)==undSpeed[0]&&motionValue(editor,12)==undSpeed[1],
@@ -421,10 +421,10 @@ void motionControlBanks(Editor& editor,const std::filesystem::path& directory)
     require(motionValue(editor,9)==undAmount[0]&&motionValue(editor,10)==undAmount[1]
             &&motionValue(editor,11)==undSpeed[0]&&motionValue(editor,12)==undSpeed[1],
             "Changing motion tabs did not retain UNDULATION values");
-    editor.dragAt(66,253,235);
+    editor.dragAt(61,253,235);
     require(motionValue(editor,9)!=undAmount[0]||motionValue(editor,10)!=undAmount[1],
             "UNDULATION AMOUNT knob stopped editing its original parameters");
-    editor.dragAt(156,253,235);
+    editor.dragAt(143,253,235);
     require(motionValue(editor,11)!=undSpeed[0]||motionValue(editor,12)!=undSpeed[1],
             "UNDULATION SPEED knob stopped editing its original parameters");
     require(motionValue(editor,25)==retainedAmount[0]&&motionValue(editor,26)==retainedAmount[1]
@@ -445,18 +445,89 @@ void motionDefaultReset(Editor& editor)
     const auto und=std::array<double,4>{motionValue(editor,9),motionValue(editor,10),
                                       motionValue(editor,11),motionValue(editor,12)};
     clickMotionTab(editor,true);
-    editor.doubleClickAt(66,253);expect(25,10);expect(26,30);
-    editor.doubleClickAt(156,253);expect(27,500);expect(28,1500);
+    editor.doubleClickAt(61,253);expect(25,10);expect(26,30);
+    editor.doubleClickAt(143,253);expect(27,500);expect(28,1500);
     for(ParamID id=9;id<=12;++id)
         require(motionValue(editor,id)==und[id-9],"Resetting SWAY changed the inactive UNDULATION range");
     const auto sway=std::array<double,4>{motionValue(editor,25),motionValue(editor,26),
                                        motionValue(editor,27),motionValue(editor,28)};
     clickMotionTab(editor,false);
-    editor.doubleClickAt(66,253);expect(9,0);expect(10,50);
-    editor.doubleClickAt(156,253);expect(11,50);expect(12,200);
+    editor.doubleClickAt(61,253);expect(9,0);expect(10,50);
+    editor.doubleClickAt(143,253);expect(11,50);expect(12,200);
     for(ParamID id=25;id<=28;++id)
         require(motionValue(editor,id)==sway[id-25],"Resetting UNDULATION changed the inactive SWAY range");
-    editor.doubleClickAt(156,91);expect(4,2000);
+    editor.doubleClickAt(212,91);expect(4,2000);
+}
+
+void bufferCapAndNewControls(Editor& editor,const std::filesystem::path& directory)
+{
+    const auto setPlain=[&](const char* name,double value)
+    {
+        const auto id=editor.parameter(name);
+        editor.set(name,editor.controller->plainParamToNormalized(id,value));
+    };
+    setPlain("Tempo sync",0);
+    setPlain("Capture buffer",500);
+    setPlain("Grain minimum",2000);setPlain("Grain maximum",4000);
+    editor.settleFooter();
+    const auto requested=std::array<double,2>{motionValue(editor,5),motionValue(editor,6)};
+    const auto pinkValues=[](const Capture& image)
+    {
+        int pink=0;
+        for(int y=130;y<159;++y)for(int x=249;x<328;++x)
+        {
+            const auto colour=image.logicalPixel(x,y);
+            pink+=GetRValue(colour)>GetGValue(colour)+25&&GetBValue(colour)>GetGValue(colour)+10;
+        }
+        return pink;
+    };
+    require(pinkValues(capture(editor))>5,"BUFFER-limited GRAIN values did not turn pink");
+    savePreview(editor,directory,L"grain-buffer-capped-100.png");
+    setPlain("Capture buffer",6000);editor.settleFooter();
+    require(motionValue(editor,5)==requested[0]&&motionValue(editor,6)==requested[1],
+            "Raising BUFFER lost the requested GRAIN handle positions");
+    require(pinkValues(capture(editor))==0,"GRAIN values remained pink after BUFFER allowed the requested sizes");
+    const auto mass=editor.plain("Grain mass");
+    editor.dragAt(61,91,50);
+    require(editor.plain("Grain mass")>mass,"MASS knob did not change parallel stream count");
+    const auto pan=std::array<double,2>{editor.plain("Grain pan minimum"),editor.plain("Grain pan maximum")};
+    editor.dragAt(439,91,65);
+    require(editor.plain("Grain pan minimum")!=pan[0]||editor.plain("Grain pan maximum")!=pan[1],
+            "PAN range knob did not respond to dragging");
+    const auto dry=editor.plain("Dry level"),wet=editor.plain("Wet level");
+    editor.dragAt(410,253,270);editor.dragAt(456,253,270);
+    require(editor.plain("Dry level")<dry&&editor.plain("Wet level")<wet,
+            "Bottom DRY/WET sliders did not change output levels");
+    editor.clickAt(458,14);editor.settleFooter();
+    require(editor.plain("Tempo sync")==1,"Header SYNC button did not enable tempo synchronization");
+    savePreview(editor,directory,L"grain-sync-100.png");
+    editor.clickAt(458,14);editor.settleFooter();
+    require(editor.plain("Tempo sync")==0,"Header SYNC button did not disable tempo synchronization");
+    editor.doubleClickAt(61,91);editor.doubleClickAt(439,91);
+    editor.doubleClickAt(410,253);editor.doubleClickAt(456,253);
+    editor.doubleClickAt(212,91);editor.doubleClickAt(288,91);
+}
+
+void noneModeDisablesEventControls(Editor& editor,const std::filesystem::path& directory)
+{
+    editor.set("Trigger mode",0.0);
+    editor.set("Grain motion mode",1.0);
+    const auto previous=editor.plain("Duck previous event");
+    editor.dragAt(352,253,225);
+    require(editor.plain("Duck previous event")==previous,"DUCK PRV remained editable in NONE mode");
+    editor.clickAt(77,185);editor.settleFooter();
+    require(motionValue(editor,24)==1.0,"Disabled UNDULATION tab remained selectable in NONE mode");
+    const auto undulation=std::array<double,2>{motionValue(editor,9),motionValue(editor,10)};
+    const auto sway=std::array<double,2>{motionValue(editor,25),motionValue(editor,26)};
+    editor.dragAt(61,253,235);
+    require(motionValue(editor,9)==undulation[0]&&motionValue(editor,10)==undulation[1],
+            "NONE mode edited event UNDULATION instead of continuous SWAY");
+    require(motionValue(editor,25)!=sway[0]||motionValue(editor,26)!=sway[1],
+            "NONE mode did not expose working SWAY controls");
+    savePreview(editor,directory,L"grain-none-sway-100.png");
+    editor.set("Trigger mode",1.0/3.0);
+    clickMotionTab(editor,false);
+    editor.doubleClickAt(61,253);
 }
 
 void testEditor (Module& module, const std::filesystem::path& directory)
@@ -464,7 +535,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
     {
         Editor editor (*module.factory);
         const auto initial = editor.size();
-        require (initial.getWidth()==786 && initial.getHeight()==549,
+        require (initial.getWidth()==750 && initial.getHeight()==549,
                  "New Grain editor must open at 150 percent");
         require (!preferenceEnabled (L"ThemeDark"), "Isolated preferences did not start light");
         savePreview (editor,directory,L"grain-light-150.png");
@@ -474,7 +545,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         editor.clickAt (87,footerMiddle);
         require (!preferenceEnabled (L"ThemeDark"), "Collapsed theme action was clickable");
         editor.clickAt (119,footerMiddle);
-        require (editor.size().getWidth()==786, "Collapsed zoom action was clickable");
+        require (editor.size().getWidth()==750, "Collapsed zoom action was clickable");
         expandSettings (editor);
         capture(editor).save(directory/L"grain-settings-150.png");
 
@@ -483,7 +554,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         savePreview(editor,directory,L"grain-dark-150.png");
         swayPreview(editor,directory,L"grain-dark-sway-150.png");
         clickSetting(editor,119);
-        require(editor.size().getWidth()==524 && editor.size().getHeight()==366,
+        require(editor.size().getWidth()==500 && editor.size().getHeight()==366,
                 "Settings zoom control did not resize to 100 percent");
         require(editor.frame.resizeCount>0,"Zoom did not notify the host frame");
         savePreview(editor,directory,L"grain-dark-100.png");
@@ -493,29 +564,31 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         savePreview(editor,directory,L"grain-light-100.png");
         swayPreview(editor,directory,L"grain-light-sway-100.png");
         motionControlBanks(editor,directory);
+        bufferCapAndNewControls(editor,directory);
+        noneModeDisablesEventControls(editor,directory);
 
         // Check meaningful controls through Windows messages, as a VST3 host sees them.
-        const auto scatter=editor.plain("Capture scatter");
-        editor.dragAt(156,91,70);
-        require(editor.plain("Capture scatter")>scatter,"SCATTER knob did not respond to upward drag");
+        const auto buffer=editor.plain("Capture buffer");
+        editor.dragAt(212,91,70);
+        require(editor.plain("Capture buffer")>buffer,"BUFFER knob did not respond to upward drag");
         const auto grainMin=editor.plain("Grain minimum"), grainMax=editor.plain("Grain maximum");
-        editor.dragAt(246,91,75);
+        editor.dragAt(288,91,75);
         require(editor.plain("Grain minimum")!=grainMin || editor.plain("Grain maximum")!=grainMax,
                 "GRAIN range knob did not respond to drag");
         require(editor.plain("Grain minimum")<=editor.plain("Grain maximum"),"Range handles crossed");
         motionDefaultReset(editor);
 
-        editor.moveTo(450,14);editor.settleFooter();editor.clickAt(450,14);editor.settleFooter();
-        editor.clickAt(450,104);editor.settleFooter();
+        editor.moveTo(390,14);editor.settleFooter();editor.clickAt(390,14);editor.settleFooter();
+        editor.clickAt(390,104);editor.settleFooter();
         require(editor.plain("Trigger mode")==3,"Trigger dropdown did not select VOLUME");
         const auto threshold=editor.plain("Volume threshold");
-        editor.dragAt(66,91,70);
+        editor.dragAt(137,91,70);
         require(editor.plain("Volume threshold")>threshold,"THLD control did not edit volume threshold");
         savePreview(editor,directory,L"grain-volume-100.png");
     }
     // Recreating the view loads the same per-user zoom and theme choices.
     Editor reopened(*module.factory);
-    require(reopened.size().getWidth()==524 && !preferenceEnabled(L"ThemeDark"),
+    require(reopened.size().getWidth()==500 && !preferenceEnabled(L"ThemeDark"),
             "New editor instance did not retain its appearance preferences");
 }
 }

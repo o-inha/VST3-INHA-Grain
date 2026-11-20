@@ -151,11 +151,12 @@ public:
         require(component->initialize(nullptr)==kResultOk,"Component initialize failed");
         require(component->queryInterface(IAudioProcessor_iid,reinterpret_cast<void**>(&audio))==kResultOk&&audio,"Audio processor interface missing");
         require(component->queryInterface(IEditController_iid,reinterpret_cast<void**>(&controller))==kResultOk&&controller,"Controller interface missing");
-        require(controller->getParameterCount()==29,"Parameter inventory changed unexpectedly");
+        require(controller->getParameterCount()==33,"Parameter inventory changed unexpectedly");
         require(audio->canProcessSampleSize(kSample32)==kResultTrue&&audio->canProcessSampleSize(kSample64)==kResultTrue,"Both sample formats required");
         IProcessContextRequirements* contextRequirements=nullptr;
         require(component->queryInterface(IProcessContextRequirements_iid,reinterpret_cast<void**>(&contextRequirements))==kResultOk&&contextRequirements,"VST3 process context requirements interface missing");
         require((contextRequirements->getProcessContextRequirements()&IProcessContextRequirements::kNeedTransportState)!=0,"Transport state requirement missing");
+        require((contextRequirements->getProcessContextRequirements()&IProcessContextRequirements::kNeedTempo)!=0,"Tempo context requirement missing");
         contextRequirements->release();
         require(component->getBusCount(kAudio,kInput)==1&&component->getBusCount(kAudio,kOutput)==1,"Expected one input/output audio bus");
         require(component->getBusCount(kEvent,kInput)==1,"MIDI event input missing");
@@ -206,50 +207,84 @@ void replaceStateValue(MemoryStream& state,ParamID id,double value)
 void stateCompatibility(Module& module)
 {
     Instance instance(module);
-    ParameterInfo motionInfo{};
+    ParameterInfo motionInfo{},syncInfo{},massInfo{};
     require(instance.controller->getParameterInfo(24,motionInfo)==kResultOk&&motionInfo.id==24
             &&motionInfo.stepCount==1&&(motionInfo.flags&ParameterInfo::kIsList)!=0
             &&(motionInfo.flags&ParameterInfo::kCanAutomate)!=0,
-            "Motion mode must be an appended, automatable two-item host list");
+            "Motion mode must retain its automatable two-item host list");
+    require(instance.controller->getParameterInfo(29,syncInfo)==kResultOk&&syncInfo.id==29
+            &&syncInfo.stepCount==1&&(syncInfo.flags&ParameterInfo::kCanAutomate)!=0,
+            "SYNC must be an appended automatable switch");
+    require(instance.controller->getParameterInfo(30,massInfo)==kResultOk&&massInfo.id==30
+            &&massInfo.stepCount==7,"MASS must expose eight integer voice counts");
     String128 motionText{};
     require(instance.controller->getParamStringByValue(24,1.0,motionText)==kResultOk,
             "Could not format SWAY mode for host");
     const std::array<char16,5> expectedSway{{'S','W','A','Y',0}};
     require(std::equal(expectedSway.begin(),expectedSway.end(),motionText),"Host motion list does not label SWAY correctly");
     MemoryStream saved;
-    require(instance.component->getState(&saved)==kResultOk,"Could not save initial v2 state");
-    require(saved.bytes.size()==8+29*sizeof(double)&&stateWord(saved,0)==0x47524149u&&stateWord(saved,4)==2,
-            "Expected v2 state with 29 parameter values");
+    require(instance.component->getState(&saved)==kResultOk,"Could not save initial v3 state");
+    require(saved.bytes.size()==8+33*sizeof(double)&&stateWord(saved,0)==0x47524149u&&stateWord(saved,4)==3,
+            "Expected v3 state with 33 parameter values");
     const auto setPlain=[&](ParamID id,double plain){replaceStateValue(saved,id,instance.normalized(id,plain));};
-    // UND and SWAY controls are independent banks, retained even while inactive.
+    // Independent motion banks and new controls must survive a full project save.
+    setPlain(4,500);setPlain(5,2000);setPlain(6,4000); // Preserve requests exceeding BUFFER.
     setPlain(9,-35);setPlain(10,45);setPlain(11,75);setPlain(12,180);
     setPlain(24,1);setPlain(25,17);setPlain(26,63);setPlain(27,250);setPlain(28,3500);
+    setPlain(29,1);setPlain(30,6);setPlain(31,-70);setPlain(32,85);
     saved.position=0;
-    require(instance.component->setState(&saved)==kResultOk,"Could not restore SWAY v2 state");
+    require(instance.component->setState(&saved)==kResultOk,"Could not restore v3 state");
     MemoryStream restored;
     require(instance.component->getState(&restored)==kResultOk&&saved.bytes==restored.bytes,
-            "SWAY state round trip lost mode or inactive UND/SWAY values");
-    require(instance.controller->getParamNormalized(24)==1.0,"SWAY mode was not restored");
+            "v3 state round trip lost requested ranges or new controls");
     saved.position=0;
-    require(instance.controller->setComponentState(&saved)==kResultOk,"Controller rejected SWAY state");
-    for(ParamID id:{9u,10u,11u,12u,24u,25u,26u,27u,28u})
-        require(instance.controller->getParamNormalized(id)==stateValue(saved,id),"Controller lost an independent motion parameter");
+    require(instance.controller->setComponentState(&saved)==kResultOk,"Controller rejected v3 state");
+    for(ParamID id:{4u,5u,6u,9u,10u,11u,12u,24u,25u,26u,27u,28u,29u,30u,31u,32u})
+        require(instance.controller->getParamNormalized(id)==stateValue(saved,id),"Controller lost an independent parameter");
 
-    MemoryStream legacy;
-    legacy.bytes=saved.bytes;
-    legacy.bytes.resize(8+24*sizeof(double));
-    replaceStateWord(legacy,4,1);
-    require(instance.component->setState(&legacy)==kResultOk,"Existing v1 projects are not compatible");
+    // Construct actual old encodings, rather than relabelling current normalized values.
+    const auto oldTime=[](double value,double minimum,double maximum){return std::cbrt((value-minimum)/(maximum-minimum));};
     MemoryStream migrated;
-    require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==2,
-            "Legacy project did not migrate to v2 state");
-    for(ParamID id=0;id<24;++id)
-        require(stateValue(migrated,id)==stateValue(legacy,id),"Migration changed a legacy parameter value");
-    require(stateValue(migrated,24)==0.0,"Legacy project did not default to UNDULATION");
-    for(const auto expected:std::array<std::pair<ParamID,double>,4>{{{25,10},{26,30},{27,500},{28,1500}}})
-        require(std::abs(stateValue(migrated,expected.first)-instance.normalized(expected.first,expected.second))<1e-12,
-                "Legacy project did not initialize a SWAY parameter to its declared default");
-
+    for(const std::uint32_t version:{1u,2u})
+    {
+        MemoryStream legacy;
+        legacy.bytes=saved.bytes;legacy.bytes.resize(8+(version==1?24:29)*sizeof(double));
+        replaceStateWord(legacy,4,version);
+        replaceStateValue(legacy,4,oldTime(2000,10,20000));
+        replaceStateValue(legacy,5,oldTime(20,5,10000)); // New minimum clips to 40 ms.
+        replaceStateValue(legacy,6,oldTime(1200,5,10000));
+        replaceStateValue(legacy,13,oldTime(500,1,10000));
+        replaceStateValue(legacy,14,oldTime(1000,1,10000));
+        replaceStateValue(legacy,15,oldTime(800,5,30000));
+        replaceStateValue(legacy,16,oldTime(10000,5,30000)); // New maximum clips to 6 s.
+        if(version==2){replaceStateValue(legacy,27,oldTime(250,25,20000));replaceStateValue(legacy,28,oldTime(3500,25,20000));}
+        require(instance.component->setState(&legacy)==kResultOk,"Existing project version is not compatible");
+        migrated.bytes.clear();migrated.position=0;
+        require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==3,
+                "Legacy project did not migrate to v3 state");
+        for(const auto expected:std::array<std::pair<ParamID,double>,7>{{{4,2000},{5,40},{6,1200},{13,500},{14,1000},{15,800},{16,6000}}})
+            require(std::abs(stateValue(migrated,expected.first)-instance.normalized(expected.first,expected.second))<1e-10,
+                    "Migration did not preserve and clip old milliseconds");
+        for(ParamID id:{0u,1u,2u,3u,7u,8u,9u,10u,11u,12u,17u,18u,19u,20u,21u,22u,23u})
+            require(stateValue(migrated,id)==stateValue(legacy,id),"Migration changed a non-time legacy parameter");
+        if(version==1)
+        {
+            require(stateValue(migrated,24)==0.0,"Legacy project did not default to UNDULATION");
+            for(const auto expected:std::array<std::pair<ParamID,double>,4>{{{25,10},{26,30},{27,500},{28,1500}}})
+                require(std::abs(stateValue(migrated,expected.first)-instance.normalized(expected.first,expected.second))<1e-10,
+                        "Legacy project did not initialize its SWAY defaults");
+        }
+        else
+        {
+            require(stateValue(migrated,24)==stateValue(legacy,24),"Migration lost selected motion mode");
+            require(std::abs(stateValue(migrated,27)-instance.normalized(27,250))<1e-10
+                    &&std::abs(stateValue(migrated,28)-instance.normalized(28,3500))<1e-10,"v2 SWAY milliseconds were not migrated");
+        }
+        require(stateValue(migrated,29)==instance.normalized(29,0)
+                &&stateValue(migrated,30)==instance.normalized(30,1)
+                &&stateValue(migrated,31)==instance.normalized(31,0)
+                &&stateValue(migrated,32)==instance.normalized(32,0),"Legacy project did not initialize new controls safely");
+    }
     const auto rejected=[&](MemoryStream& invalid,const char* message)
     {
         invalid.position=0;
@@ -260,11 +295,10 @@ void stateCompatibility(Module& module)
     };
     MemoryStream invalid;invalid.bytes=saved.bytes;replaceStateWord(invalid,0,0);rejected(invalid,"Invalid state magic accepted");
     invalid.bytes=saved.bytes;replaceStateWord(invalid,4,99);rejected(invalid,"Unknown future state version accepted");
-    invalid.bytes=saved.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated v2 parameter payload accepted");
-    invalid.bytes=legacy.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated legacy parameter payload accepted");
+    invalid.bytes=saved.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated v3 parameter payload accepted");
     invalid.bytes.assign(4,0);rejected(invalid,"Truncated state header accepted");
     require(instance.component->setState(nullptr)!=kResultOk,"Null state stream accepted");
-    std::cout<<"v1 compatibility, independent SWAY v2 state, and invalid-state rejection passed\n";
+    std::cout<<"v1/v2 millisecond migration, v3 state, new controls and invalid-state rejection passed\n";
 }
 
 template<typename Sample> void formatSmoke(Module& module,int channels,int symbolic) {
@@ -292,28 +326,132 @@ std::vector<float> renderFixture(Module& module,int noteOffset,int wetAutomation
     Instance instance(module);instance.setup(2,kSample32);
     Changes controls;
     const auto set=[&](ParamID id,double value){controls.add(id,0,instance.normalized(id,value));};
-    set(0,2);set(1,100);set(4,20);set(5,10);set(6,10);set(7,0);set(8,0);
-    set(9,0);set(10,0);set(13,1);set(14,1);set(15,200);set(16,200);
+    set(0,2);set(1,100);set(4,500);set(5,100);set(6,100);set(7,0);set(8,0);
+    set(9,0);set(10,0);set(13,40);set(14,40);set(15,1200);set(16,1200);
     set(17,0);set(18,0);set(19,0);set(20,0);
-    set(24,initialMotionMode);set(25,60);set(26,60);set(27,25);set(28,25);
+    set(24,initialMotionMode);set(25,60);set(26,60);set(27,40);set(28,40);
     std::array<std::array<float,256>,2> input{},output{};
     float* ins[2]{input[0].data(),input[1].data()};float* outs[2]{output[0].data(),output[1].data()};
     AudioBusBuffers in{},out{};in.numChannels=out.numChannels=2;in.channelBuffers32=ins;out.channelBuffers32=outs;
     ProcessContext context{};context.sampleRate=48000;context.state=ProcessContext::kPlaying;
     ProcessData data{};data.processMode=kRealtime;data.symbolicSampleSize=kSample32;data.numSamples=256;data.numInputs=data.numOutputs=1;data.inputs=&in;data.outputs=&out;data.processContext=&context;
-    std::vector<float> result;result.reserve(4096);
-    for(int block=0;block<16;++block){
+    std::vector<float> result;result.reserve(32768);
+    for(int block=0;block<128;++block){
         for(int i=0;i<256;++i)input[0][i]=input[1][i]=0.15f*std::sin(static_cast<float>(block*256+i)*0.027f);
         Events events;if(block==0&&noteOffset>=0)events.note(noteOffset);
-        Changes automation;if(block==4&&wetAutomationOffset>=0){automation.add(20,0,instance.normalized(20,0));automation.add(20,wetAutomationOffset,instance.normalized(20,-60));}
-        if(block==4&&bypassAutomationOffset>=0)automation.add(23,bypassAutomationOffset,1.0);
-        if(block==4&&motionAutomationOffset>=0)automation.add(24,motionAutomationOffset,1.0);
-        const bool automate=block==4&&(wetAutomationOffset>=0||bypassAutomationOffset>=0||motionAutomationOffset>=0);
+        Changes automation;if(block==32&&wetAutomationOffset>=0){automation.add(20,0,instance.normalized(20,0));automation.add(20,wetAutomationOffset,instance.normalized(20,-60));}
+        if(block==32&&bypassAutomationOffset>=0)automation.add(23,bypassAutomationOffset,1.0);
+        if(block==32&&motionAutomationOffset>=0)automation.add(24,motionAutomationOffset,1.0);
+        const bool automate=block==32&&(wetAutomationOffset>=0||bypassAutomationOffset>=0||motionAutomationOffset>=0);
         data.inputEvents=&events;data.inputParameterChanges=block==0?&controls:(automate?&automation:nullptr);context.projectTimeSamples=block*256;
         require(instance.audio->process(data)==kResultOk,"Fixture render callback failed");
         for(float value:output[0]){require(std::isfinite(value),"Fixture produced non-finite audio");result.push_back(value);}
     }
     return result;
+}
+
+void transportRestartRepeatability(Module& module)
+{
+    for(const int mode:{1,2,3})
+    {
+        Instance instance(module);
+        MemoryStream configured;
+        require(instance.component->getState(&configured)==kResultOk,"Cannot configure repeatability render");
+        const auto set=[&](ParamID id,double value){replaceStateValue(configured,id,instance.normalized(id,value));};
+        set(0,mode);set(1,100);set(2,75);set(3,-30);set(4,300);set(5,60);set(6,100);
+        set(9,0);set(10,0);set(13,40);set(14,40);set(15,500);set(16,500);
+        set(17,0);set(18,0);set(19,-60);set(20,-6);set(30,3);set(31,-70);set(32,70);
+        configured.position=0;
+        require(instance.component->setState(&configured)==kResultOk,"Cannot restore repeatability settings");
+        instance.setup(2,kSample32);
+        std::array<std::array<float,256>,2> input{},output{};
+        float* ins[2]{input[0].data(),input[1].data()};float* outs[2]{output[0].data(),output[1].data()};
+        AudioBusBuffers in{},out{};in.numChannels=out.numChannels=2;in.channelBuffers32=ins;out.channelBuffers32=outs;
+        ProcessContext context{};context.sampleRate=48000;
+        ProcessData data{};data.processMode=kRealtime;data.symbolicSampleSize=kSample32;data.numSamples=256;
+        data.numInputs=data.numOutputs=1;data.inputs=&in;data.outputs=&out;data.processContext=&context;
+        const auto render=[&](bool playing,int blocks)
+        {
+            std::vector<float> result;
+            result.reserve(static_cast<std::size_t>(blocks)*512);
+            context.state=playing?ProcessContext::kPlaying|ProcessContext::kCycleActive:0;
+            for(int block=0;block<blocks;++block)
+            {
+                for(int i=0;i<256;++i)
+                {
+                    const auto n=block*256+i;
+                    const auto gate=n%7200<3600?1.0:0.0;
+                    input[0][i]=playing?static_cast<float>(gate*(0.16*std::sin(n*0.031)+0.08*std::cos(n*0.067))):0.0f;
+                    input[1][i]=playing?static_cast<float>(gate*(0.13*std::sin(n*0.047)+0.06*std::cos(n*0.083))):0.0f;
+                }
+                Events events;if(playing&&block%24==0)events.note(128);
+                context.projectTimeSamples=123456+(playing?block*256:0);
+                data.inputEvents=&events;
+                require(instance.audio->process(data)==kResultOk,"Transport repeatability callback failed");
+                for(int i=0;i<256;++i){result.push_back(output[0][i]);result.push_back(output[1][i]);}
+            }
+            return result;
+        };
+        const auto first=render(true,128);
+        const auto cycled=render(true,128);
+        require(first==cycled,"Continuous loop rewind changed seeded output with identical source/history");
+        render(false,16); // Hosts continue calling process with a stationary timeline while stopped.
+        const auto restarted=render(true,128);
+        require(first==restarted,"Pause/play at the same timeline changed seeded grain audio");
+        double energy=0;for(const auto sample:first){require(std::isfinite(sample),"Restart render was non-finite");energy+=sample*sample;}
+        require(energy>0.001,"Repeatability render did not exercise triggered grain audio");
+    }
+    std::cout<<"Transient/MIDI/volume continuous loops and stopped-callback restarts repeat bit-exactly\n";
+}
+
+void syncAndPanHost(Module& module)
+{
+    const auto render=[&](double bpm,bool sync)
+    {
+        Instance instance(module);
+        MemoryStream configured;
+        require(instance.component->getState(&configured)==kResultOk,"Cannot configure sync/pan render");
+        const auto set=[&](ParamID id,double value){replaceStateValue(configured,id,instance.normalized(id,value));};
+        set(0,2);set(1,100);set(9,0);set(10,0);set(17,0);set(18,0);set(19,-60);set(20,-6);
+        set(29,sync?1:0);set(30,1);set(31,100);set(32,100);
+        // Shared normalized time positions select exact note lengths when synced.
+        for(ParamID id:{4u,15u,16u})replaceStateValue(configured,id,0.8); // One bar.
+        for(ParamID id:{5u,6u})replaceStateValue(configured,id,0.2); // Eighth note.
+        for(ParamID id:{13u,14u})replaceStateValue(configured,id,0.0); // Sixteenth note.
+        configured.position=0;
+        require(instance.component->setState(&configured)==kResultOk,"Cannot load sync/pan render settings");
+        instance.setup(2,kSample32);
+        if(sync)
+        {
+            String128 text{};
+            require(instance.controller->getParamStringByValue(5,1.0,text)==kResultOk,"Host cannot format synced duration");
+            const std::array<char16,7> twoBars{{'2',' ','B','A','R','S',0}};
+            require(std::equal(twoBars.begin(),twoBars.end(),text),"Host did not expose two-bar duration label");
+        }
+        std::array<std::array<float,256>,2> input{},output{};
+        float* ins[2]{input[0].data(),input[1].data()};float* outs[2]{output[0].data(),output[1].data()};
+        AudioBusBuffers in{},out{};in.numChannels=out.numChannels=2;in.channelBuffers32=ins;out.channelBuffers32=outs;
+        ProcessContext context{};context.sampleRate=48000;context.tempo=bpm;context.state=ProcessContext::kPlaying|ProcessContext::kTempoValid;
+        ProcessData data{};data.processMode=kRealtime;data.symbolicSampleSize=kSample32;data.numSamples=256;
+        data.numInputs=data.numOutputs=1;data.inputs=&in;data.outputs=&out;data.processContext=&context;
+        std::array<std::vector<float>,2> result;
+        for(int block=0;block<160;++block)
+        {
+            for(int i=0;i<256;++i)input[0][i]=input[1][i]=0.2f*std::sin(static_cast<float>(block*256+i)*0.053f);
+            Events events;if(block==0)events.note(0);data.inputEvents=&events;context.projectTimeSamples=block*256;
+            require(instance.audio->process(data)==kResultOk,"Sync/pan callback failed");
+            for(int c=0;c<2;++c)for(const auto value:output[c]){require(std::isfinite(value),"Sync/pan render was non-finite");result[c].push_back(value);}
+        }
+        return result;
+    };
+    const auto at80=render(80,true),at120=render(120,true),slow=render(30,true);
+    require(at80!=at120&&slow!=at80,"Tempo changes did not reach synced grain processing");
+    double leftEnergy=0,rightEnergy=0;
+    for(std::size_t i=0;i<at80[0].size();++i){leftEnergy+=at80[0][i]*at80[0][i];rightEnergy+=at80[1][i]*at80[1][i];}
+    require(leftEnergy<1e-10&&rightEnergy>0.001,"PAN hard right did not reach per-grain output");
+    const auto free80=render(80,false),free120=render(120,false);
+    require(free80==free120,"Unsynced processing changed when only host tempo changed");
+    std::cout<<"Host tempo sync at 30/80/120 BPM, note labels, and hard-right grain pan passed\n";
 }
 
 void fixtureOffsets(Module& module) {
@@ -323,13 +461,13 @@ void fixtureOffsets(Module& module) {
     require(difference>0.01,"MIDI input did not trigger actual granular audio");
     require(note==repeated,"Same host MIDI/timeline did not repeat precisely");
     const auto automated=renderFixture(module,128,192);
-    // The wet automation ramp starts at block 4; earlier blocks must be bit-identical.
-    for(int i=0;i<1024;++i)require(automated[i]==note[i],"Automation leaked into an earlier processing block");
-    double later=0;for(std::size_t i=1280;i<note.size();++i)later+=std::abs(automated[i]-note[i]);
+    // The wet automation ramp starts at block 32; earlier blocks must be bit-identical.
+    for(int i=0;i<8192;++i)require(automated[i]==note[i],"Automation leaked into an earlier processing block");
+    double later=0;for(std::size_t i=8448;i<note.size();++i)later+=std::abs(automated[i]-note[i]);
     require(later>0.001,"Wet automation did not reach the DSP");
     const auto bypassed=renderFixture(module,128,-1,192);
-    for(int i=0;i<1216;++i)require(bypassed[i]==note[i],"Discrete bypass automation ignored its in-block sample offset");
-    double bypassDifference=0;for(std::size_t i=1400;i<note.size();++i)bypassDifference+=std::abs(bypassed[i]-note[i]);
+    for(int i=0;i<8384;++i)require(bypassed[i]==note[i],"Discrete bypass automation ignored its in-block sample offset");
+    double bypassDifference=0;for(std::size_t i=8600;i<note.size();++i)bypassDifference+=std::abs(bypassed[i]-note[i]);
     require(bypassDifference>0.001,"In-block bypass automation did not reach the DSP");
     const auto sway=renderFixture(module,128,-1,-1,1);
     const auto swayRepeated=renderFixture(module,128,-1,-1,1);
@@ -337,8 +475,8 @@ void fixtureOffsets(Module& module) {
     double swayDifference=0;for(std::size_t i=512;i<note.size();++i)swayDifference+=std::abs(sway[i]-note[i]);
     require(swayDifference>0.001,"SWAY mode did not affect granular audio through host parameters");
     const auto motionAutomated=renderFixture(module,128,-1,-1,0,192);
-    for(int i=0;i<1216;++i)require(motionAutomated[i]==note[i],"Motion mode automation applied before its sample offset");
-    double motionDifference=0;for(std::size_t i=1400;i<note.size();++i)motionDifference+=std::abs(motionAutomated[i]-note[i]);
+    for(int i=0;i<8384;++i)require(motionAutomated[i]==note[i],"Motion mode automation applied before its sample offset");
+    double motionDifference=0;for(std::size_t i=8600;i<note.size();++i)motionDifference+=std::abs(motionAutomated[i]-note[i]);
     require(motionDifference>0.001,"Automated motion mode did not change an active event");
     std::cout<<"Fixture MIDI offsets, seeded repeats, and host automation passed\n";
 }
@@ -348,7 +486,7 @@ int wmain(int argc,wchar_t** argv) {
     try{
         require(argc==3,"Usage: GrainModuleSmoke <production-vst3-binary> <fixture-binary>");
         {Module production(argv[1]);formatSmoke<float>(production,1,kSample32);formatSmoke<float>(production,2,kSample32);formatSmoke<double>(production,1,kSample64);formatSmoke<double>(production,2,kSample64);}
-        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);}
+        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);transportRestartRepeatability(fixture);syncAndPanHost(fixture);}
         std::cout<<"Grain Windows module smoke passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

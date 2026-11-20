@@ -1,4 +1,4 @@
-INHA Grain 0.2.0 - Windows x64 VST3
+INHA Grain 0.3.0 - Windows x64 VST3
 
 1. Close your DAW.
 2. Copy the entire "INHA Grain.vst3" folder to:
@@ -17,5 +17,10 @@ both ends together and Alt changes the width. Double-click resets a control.
 Use the gear in the footer for light/dark theme and 100%/150% size.
 
 Read README.md for capture, UNDULATION/SWAY and repeatability behavior.
-Existing 0.1.0 project settings load in UNDULATION mode with their original
-parameters. Each motion tab retains its own AMOUNT/SPEED settings.
+Saved 0.1/0.2 settings migrate duration values into the new limits.
+Each motion tab retains its own AMOUNT/SPEED settings. NONE uses SWAY.
+
+Free durations: 40 MS to 6 S. SYNC: 1/16 note to 2 bars (4/4).
+MASS selects 1x to 8x parallel streams. PAN varies each grain's stereo balance.
+BUFFER caps the effective GRAIN size; pink values identify requested ranges
+that currently exceed BUFFER. Raising BUFFER restores those requested sizes.

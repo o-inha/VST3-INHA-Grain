@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(INHAGrain VERSION 0.2.0 LANGUAGES CXX)
+project(INHAGrain VERSION 0.3.0 LANGUAGES CXX)
 
 # Ship a self-contained Windows binary without a Visual C++ redistributable.
 if(MSVC)
@@ -59,6 +59,10 @@ if(INHA_PLUGIN_BUILD_TESTS)
     target_include_directories(GrainAutomationTests PRIVATE Source)
     target_compile_features(GrainAutomationTests PRIVATE cxx_std_17)
     add_test(NAME GrainAutomationTests COMMAND GrainAutomationTests)
+    add_executable(GrainTimingTests Tests/TimingTests.cpp)
+    target_include_directories(GrainTimingTests PRIVATE Source)
+    target_compile_features(GrainTimingTests PRIVATE cxx_std_17)
+    add_test(NAME GrainTimingTests COMMAND GrainTimingTests)
     if(WIN32 AND INHA_PLUGIN_BUILD_VST3)
         add_library(GrainEditorFixture MODULE ${GRAIN_PLUGIN_SOURCES} Tests/EditorTestLicense.cpp)
         target_compile_features(GrainEditorFixture PRIVATE cxx_std_17)

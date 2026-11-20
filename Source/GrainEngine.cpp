@@ -1,4 +1,5 @@
 #include "GrainEngine.h"
+#include "GrainTiming.h"
 
 #include <algorithm>
 #include <cmath>
@@ -119,7 +120,7 @@ void GrainEngine::prepare (double sampleRate)
 {
     sampleRate_ = std::clamp (std::isfinite (sampleRate) ? sampleRate : 48000.0,
                               8000.0, 384000.0);
-    capacity_ = static_cast<std::size_t> (std::ceil (sampleRate_ * 20.0)) + 8;
+    capacity_ = static_cast<std::size_t> (std::ceil (sampleRate_ * Timing::maximumCaptureMilliseconds * 0.001)) + 8;
     for (auto& event : events_)
         event.samples.assign (capacity_ * 2, 0.0f);
 
@@ -181,19 +182,29 @@ void GrainEngine::setParameters (const Parameters& values) noexcept
     p.amount = finiteClamp (p.amount, 0, 100, 100);
     p.sensitivity = finiteClamp (p.sensitivity, 0, 100, 50);
     p.thresholdDb = finiteClamp (p.thresholdDb, -60, 0, -24);
-    p.scatterMs = finiteClamp (p.scatterMs, 10, 20000, 2000);
-    p.grainMinMs = finiteClamp (p.grainMinMs, 5, 10000, 200);
-    p.grainMaxMs = finiteClamp (p.grainMaxMs, 5, 10000, 1000);
+    p.durationMinimumMs = finiteClamp (p.durationMinimumMs, 1,
+        static_cast<float> (Timing::maximumCaptureMilliseconds), 40);
+    p.durationMaximumMs = finiteClamp (p.durationMaximumMs, p.durationMinimumMs,
+        static_cast<float> (Timing::maximumCaptureMilliseconds), 6000);
+    p.tempoBpm = static_cast<float> (Timing::tempo (p.tempoBpm));
+    const auto low = p.durationMinimumMs;
+    const auto high = p.durationMaximumMs;
+    p.scatterMs = finiteClamp (p.scatterMs, low, high, 2000);
+    p.grainMinMs = finiteClamp (p.grainMinMs, low, high, 200);
+    p.grainMaxMs = finiteClamp (p.grainMaxMs, low, high, 1000);
+    p.mass = std::clamp (p.mass, 1, static_cast<int> (maxStreams));
+    p.panMinPercent = finiteClamp (p.panMinPercent, -100, 100, 0);
+    p.panMaxPercent = finiteClamp (p.panMaxPercent, -100, 100, 0);
     p.envMinPercent = finiteClamp (p.envMinPercent, 0, 100, 0);
     p.envMaxPercent = finiteClamp (p.envMaxPercent, 0, 100, 50);
     p.undulationMinPercent = finiteClamp (p.undulationMinPercent, -100, 100, 0);
     p.undulationMaxPercent = finiteClamp (p.undulationMaxPercent, -100, 100, 50);
     p.speedMinPercent = finiteClamp (p.speedMinPercent, 1, 400, 50);
     p.speedMaxPercent = finiteClamp (p.speedMaxPercent, 1, 400, 200);
-    p.attackMinMs = finiteClamp (p.attackMinMs, 1, 10000, 500);
-    p.attackMaxMs = finiteClamp (p.attackMaxMs, 1, 10000, 1000);
-    p.releaseMinMs = finiteClamp (p.releaseMinMs, 5, 30000, 800);
-    p.releaseMaxMs = finiteClamp (p.releaseMaxMs, 5, 30000, 10000);
+    p.attackMinMs = finiteClamp (p.attackMinMs, low, high, 500);
+    p.attackMaxMs = finiteClamp (p.attackMaxMs, low, high, 1000);
+    p.releaseMinMs = finiteClamp (p.releaseMinMs, low, high, 800);
+    p.releaseMaxMs = finiteClamp (p.releaseMaxMs, low, high, 6000);
     p.duckDryPercent = finiteClamp (p.duckDryPercent, 0, 100, 90);
     p.duckPreviousPercent = finiteClamp (p.duckPreviousPercent, 0, 100, 90);
     p.dryDb = finiteClamp (p.dryDb, -60, 6, 0);
@@ -201,8 +212,8 @@ void GrainEngine::setParameters (const Parameters& values) noexcept
     p.motionMode = std::clamp (p.motionMode, 0, 1);
     p.swayAmountMinPercent = finiteClamp (p.swayAmountMinPercent, 0, 100, 10);
     p.swayAmountMaxPercent = finiteClamp (p.swayAmountMaxPercent, 0, 100, 30);
-    p.swaySpeedMinMs = finiteClamp (p.swaySpeedMinMs, 25, 20000, 500);
-    p.swaySpeedMaxMs = finiteClamp (p.swaySpeedMaxMs, 25, 20000, 1500);
+    p.swaySpeedMinMs = finiteClamp (p.swaySpeedMinMs, low, high, 500);
+    p.swaySpeedMaxMs = finiteClamp (p.swaySpeedMaxMs, low, high, 1500);
     if (p.dryDb != parameters_.dryDb)
         dryTarget_ = dbGain (p.dryDb);
     if (p.wetDb != parameters_.wetDb)
@@ -259,7 +270,7 @@ GrainEngine::Event* GrainEngine::startEvent (bool live, bool held,
     const auto key = hash (static_cast<std::uint64_t> (timeline_) ^ hash (ordinal));
     for (auto& previous : events_)
     {
-        if (!previous.active || parameters_.duckPreviousPercent <= 0.0f)
+        if (!previous.active || parameters_.mode == 0 || parameters_.duckPreviousPercent <= 0.0f)
             continue;
         const auto remaining = previous.releasing
             ? std::max<std::uint64_t> (1, previous.release -
@@ -281,10 +292,22 @@ GrainEngine::Event* GrainEngine::startEvent (bool live, bool held,
                                      parameters_.attackMaxMs, key, 1));
     event.release = samplesForMs (pick (parameters_.releaseMinMs,
                                       parameters_.releaseMaxMs, key, 2));
+    if (parameters_.synced)
+    {
+        event.attack = samplesForMs (Timing::quantizeMilliseconds (
+            event.attack * 1000.0 / sampleRate_, parameters_.tempoBpm));
+        event.release = samplesForMs (Timing::quantizeMilliseconds (
+            event.release * 1000.0 / sampleRate_, parameters_.tempoBpm));
+    }
     event.captureLimit = std::min<std::uint64_t> (capacity_, samplesForMs (
         parameters_.scatterMs));
-    event.previousGrain = 0;
-    event.nextGrain = static_cast<std::int64_t> (samplesForMs (5));
+    event.previousGrain.fill (0);
+    const auto first = std::min (samplesForMs (parameters_.durationMinimumMs), event.captureLimit);
+    const auto stagger = std::max<std::uint64_t> (1, first / (2 * parameters_.mass));
+    for (std::size_t stream = 0; stream < maxStreams; ++stream)
+        event.nextGrain[stream] = static_cast<std::int64_t> (first + stream * stagger);
+    event.audioStart = 0;
+    event.audioStarted = false;
     event.releaseStart = 1.0f;
     event.envelope = 0.0f;
     event.undulation = pick (parameters_.undulationMinPercent,
@@ -314,16 +337,22 @@ void GrainEngine::startRelease (Event& event) noexcept
     }
 }
 
-void GrainEngine::launchGrain (Event& event) noexcept
+void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
 {
     Grain* freeGrain = nullptr;
     for (auto& grain : event.grains)
         if (!grain.active) { freeGrain = &grain; break; }
-    if (freeGrain == nullptr || event.written < 8)
+    const auto available = std::min ({ event.written, static_cast<std::uint64_t> (capacity_),
+                                      samplesForMs (parameters_.scatterMs) });
+    // A grain is one contiguous, already-captured slice. Never replay a tiny
+    // startup buffer inside a longer envelope: that manufactured pitched tones.
+    const auto minimumCapture = parameters_.synced
+        ? samplesForMs (Timing::minimumDuration (true, parameters_.tempoBpm))
+        : std::min (samplesForMs (parameters_.durationMinimumMs),
+            event.live ? samplesForMs (parameters_.scatterMs) : event.captureLimit);
+    if (freeGrain == nullptr || available < minimumCapture)
     {
-        // Normally impossible with the duration slew bound; still bounded
-        // if a future parameter extension introduces an extreme ratio.
-        event.nextGrain = static_cast<std::int64_t> (event.age + samplesForMs (2.5));
+        event.nextGrain[stream] = static_cast<std::int64_t> (event.age + samplesForMs (1));
         return;
     }
     const auto serial = event.grainSerial++;
@@ -331,57 +360,67 @@ void GrainEngine::launchGrain (Event& event) noexcept
     const auto minimum = std::min (parameters_.grainMinMs, parameters_.grainMaxMs);
     const auto maximum = std::max (parameters_.grainMinMs, parameters_.grainMaxMs);
     double size = minimum + (maximum - minimum) * event.grainQuantile;
-    if (parameters_.motionMode == 1)
-        size = std::clamp (size * (1.0 + swayValue (timeline_)), 5.0, 10000.0);
+    if (parameters_.mode == 0 || parameters_.motionMode == 1)
+        size *= 1.0 + swayValue (timeline_);
     else
     {
         const auto progress = std::clamp (static_cast<double> (event.age) /
             (static_cast<double> (event.attack + event.release) * event.speed), 0.0, 1.0);
-        const auto destination = event.undulation < 0.0f ? 5.0 : 10000.0;
+        const auto destination = event.undulation < 0.0f
+            ? parameters_.durationMinimumMs : parameters_.durationMaximumMs;
         size += (destination - size) * std::abs (event.undulation) * progress;
     }
-    auto duration = static_cast<std::uint32_t> (samplesForMs (size));
-    if (event.previousGrain != 0)
-        duration = std::clamp (duration, std::max<std::uint32_t> (2, event.previousGrain / 2),
-                               event.previousGrain * 2);
-    event.previousGrain = duration;
+    size = std::clamp (size, static_cast<double> (parameters_.durationMinimumMs),
+                            static_cast<double> (parameters_.durationMaximumMs));
+    if (parameters_.synced)
+        size = Timing::quantizeMilliseconds (size, parameters_.tempoBpm);
+    auto duration = static_cast<std::uint32_t> (std::min (samplesForMs (size), available));
+    auto& previous = event.previousGrain[stream];
+    if (previous != 0)
+        duration = std::min<std::uint32_t> (static_cast<std::uint32_t> (available),
+            std::clamp (duration, std::max<std::uint32_t> (2, previous / 2), previous * 2));
+    if (parameters_.synced)
+    {
+        // Compare integer frames, so rounding a beat to the sample grid cannot
+        // accidentally floor an exact note duration to the preceding note.
+        std::uint32_t snapped = static_cast<std::uint32_t> (minimumCapture);
+        for (std::size_t step = 0; step < Timing::beats.size(); ++step)
+        {
+            const auto frames = samplesForMs (Timing::syncMilliseconds (
+                Timing::syncNormalized (step), parameters_.tempoBpm));
+            if (frames <= duration)
+                snapped = static_cast<std::uint32_t> (frames);
+        }
+        duration = snapped;
+    }
+    previous = duration;
 
     auto& grain = *freeGrain;
     grain.active = true;
-    grain.age = 0;
+    grain.age = grain.position = 0;
     grain.duration = duration;
     const auto shape = pick (parameters_.envMinPercent, parameters_.envMaxPercent,
                              key, 11) * 0.01f * (curveCount - 1);
     grain.curve = static_cast<std::uint16_t> (std::min<float> (curveCount - 2, std::floor (shape)));
     grain.curveMix = shape - grain.curve;
-
-    auto available = std::min<std::uint64_t> (event.written, capacity_);
-    auto begin = event.written - available;
-    if (event.live)
+    const auto pan = pick (parameters_.panMinPercent, parameters_.panMaxPercent,
+                           key, 0x50414e) * 0.01f;
+    // Stereo balance: center preserves both channels and their original level.
+    grain.leftGain = pan <= 0.0f ? 1.0f : std::cos (pan * static_cast<float> (pi * 0.5));
+    grain.rightGain = pan >= 0.0f ? 1.0f : std::cos (-pan * static_cast<float> (pi * 0.5));
+    const auto offsets = available - duration;
+    const auto offset = std::min (offsets, static_cast<std::uint64_t> (
+        random (key, 12) * static_cast<double> (offsets + 1)));
+    grain.begin = event.written - available + offset;
+    // Writer and grain advance by one frame together. The contiguous slice
+    // remains valid even if its ring-buffer slots are overwritten after reading.
+    if (!event.audioStarted)
     {
-        const auto requested = samplesForMs (parameters_.scatterMs);
-        available = std::min (available, requested);
-        begin = event.written - available;
-        // Reserve enough distance from the live writer that no sample read
-        // by this grain can be overwritten before its envelope finishes.
-        const auto oldestSafe = event.written > capacity_ - duration
-            ? event.written - (capacity_ - duration) : 0;
-        if (begin < oldestSafe)
-        {
-            available -= std::min (available - 1, oldestSafe - begin);
-            begin = oldestSafe;
-        }
+        event.audioStarted = true;
+        event.audioStart = event.age;
     }
-    grain.begin = begin;
-    grain.crossfade = static_cast<std::uint32_t> (std::min<std::uint64_t> (
-        samplesForMs (2), available / 4));
-    grain.period = static_cast<std::uint32_t> (std::max<std::uint64_t> (
-        1, available - grain.crossfade));
-    grain.position = std::min (grain.period - 1, static_cast<std::uint32_t> (
-        random (key, 12) * grain.period));
-
-    // Every grain schedules the following grain at its halfway point.
-    event.nextGrain = static_cast<std::int64_t> (event.age + std::max<std::uint32_t> (1, duration / 2));
+    event.nextGrain[stream] = static_cast<std::int64_t> (event.age +
+        std::max<std::uint32_t> (1, duration / 2));
 }
 
 float GrainEngine::grainWindow (const Grain& grain) const noexcept
@@ -443,8 +482,9 @@ std::array<float, 2> GrainEngine::renderEvent (Event& event) noexcept
         const auto remaining = event.pressureRemaining--;
         event.pressureGain *= static_cast<float> (remaining - 1) / remaining;
     }
-    if (static_cast<std::int64_t> (event.age) >= event.nextGrain)
-        launchGrain (event);
+    for (std::size_t stream = 0; stream < static_cast<std::size_t> (parameters_.mass); ++stream)
+        if (static_cast<std::int64_t> (event.age) >= event.nextGrain[stream])
+            launchGrain (event, stream);
 
     std::array<float, 2> output {};
     float weight = 0.0f;
@@ -454,19 +494,11 @@ std::array<float, 2> GrainEngine::renderEvent (Event& event) noexcept
             continue;
         const auto window = grainWindow (grain);
         weight += window;
-        auto blend = 1.0f;
-        if (grain.crossfade != 0 && grain.position < grain.crossfade)
-            blend = smoothstep (static_cast<float> (grain.position) / grain.crossfade);
-        for (unsigned channel = 0; channel != 2; ++channel)
-        {
-            auto sample = readSample (event, grain.begin + grain.position, channel);
-            if (blend < 1.0f)
-                sample = readSample (event, grain.begin + grain.period + grain.position, channel) *
-                             (1.0f - blend) + sample * blend;
-            output[channel] += sample * window;
-        }
-        if (++grain.position >= grain.period)
-            grain.position = 0;
+        output[0] += readSample (event, grain.begin + grain.position, 0) *
+                     window * grain.leftGain;
+        output[1] += readSample (event, grain.begin + grain.position, 1) *
+                     window * grain.rightGain;
+        ++grain.position;
         if (++grain.age >= grain.duration)
             grain.active = false;
     }
@@ -475,7 +507,7 @@ std::array<float, 2> GrainEngine::renderEvent (Event& event) noexcept
     // relying on the first grain's window would cancel that fade during
     // normalization. Event release/retirement supplies the smooth ending.
     const auto startup = samplesForMs (5);
-    const auto elapsed = event.age > startup ? event.age - startup : 0;
+    const auto elapsed = event.audioStarted ? event.age - event.audioStart : 0;
     const auto startupGain = smoothstep (static_cast<float> (elapsed) /
                                          static_cast<float> (startup));
     const auto gain = event.envelope * event.pressureGain * startupGain /

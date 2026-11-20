@@ -1,4 +1,5 @@
 #include "GrainEngine.h"
+#include "GrainTiming.h"
 
 #include <algorithm>
 #include <array>
@@ -35,7 +36,7 @@ namespace InhaGrain {
 struct GrainEngineTestAccess {
     struct EventState {
         bool active = false;
-        std::uint64_t age = 0, attack = 0, release = 0, grainSerial = 0;
+        std::uint64_t age = 0, attack = 0, release = 0, grainSerial = 0, written = 0;
         std::uint32_t previousGrain = 0;
         float grainQuantile = 0.0f, undulation = 0.0f, speed = 0.0f;
     };
@@ -43,10 +44,32 @@ struct GrainEngineTestAccess {
         for (const auto& event : engine.events_) {
             if (!event.active) continue;
             return { true, event.age, event.attack, event.release, event.grainSerial,
-                     event.previousGrain, event.grainQuantile, event.undulation, event.speed };
+                     event.written, event.previousGrain[0], event.grainQuantile, event.undulation, event.speed };
         }
         return {};
     }
+    static bool validSlices(const GrainEngine& engine) {
+        for (const auto& event : engine.events_) {
+            if (!event.active) continue;
+            for (const auto& grain : event.grains) {
+                if (!grain.active) continue;
+                const auto oldest = event.written > engine.capacity_ ? event.written - engine.capacity_ : 0;
+                if (grain.duration == 0 || grain.position >= grain.duration ||
+                    grain.begin + grain.position < oldest ||
+                    grain.begin + grain.duration > event.written)
+                    return false;
+            }
+        }
+        return true;
+    }
+    static std::size_t activeGrains(const GrainEngine& engine) {
+        std::size_t count = 0;
+        for (const auto& event : engine.events_)
+            if (event.active)
+                for (const auto& grain : event.grains) count += grain.active ? 1 : 0;
+        return count;
+    }
+    static Parameters parameters(const GrainEngine& engine) { return engine.parameters_; }
     static float swayAt(const GrainEngine& engine, std::int64_t sample) {
         return engine.swayValue(sample);
     }
@@ -409,6 +432,213 @@ void testShortCaptureLoopSeams() {
     CHECK(largestStep < 0.08, "long grains smooth the repeated seams of a much shorter capture buffer");
 }
 
+double lagCorrelation(const std::vector<float>& audio, int begin, int end, int lag) {
+    double cross = 0.0, a = 0.0, b = 0.0;
+    for (int n = begin + lag; n < end; ++n) {
+        const double x = audio[static_cast<std::size_t>(n)];
+        const double y = audio[static_cast<std::size_t>(n - lag)];
+        cross += x * y; a += x * x; b += y * y;
+    }
+    return cross / std::sqrt(std::max(1.0e-30, a * b));
+}
+
+void testTriggerDoesNotManufactureTinyLoopTones() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    GrainEngine e;
+    e.prepare(rate);
+    auto p = base();
+    p.scatterMs = 2000.0f;
+    p.grainMinMs = p.grainMaxMs = 1000.0f;
+    p.attackMinMs = p.attackMaxMs = 40.0f;
+    p.releaseMinMs = p.releaseMaxMs = 2000.0f;
+    p.envMinPercent = p.envMaxPercent = 50.0f;
+    p.duckPreviousPercent = 0.0f;
+    const int total = static_cast<int>(rate * 0.4);
+    std::vector<float> noise(static_cast<std::size_t>(total)), tone(noise.size());
+    bool slices = true, silentBeforeCapture = true;
+    for (int kind = 0; kind < 2; ++kind) {
+        e.setParameters(p); e.reset(1234567); e.noteOn();
+        std::uint32_t randomState = 0x217564a3u;
+        for (int n = 0; n < total; ++n) {
+            randomState ^= randomState << 13; randomState ^= randomState >> 17;
+            randomState ^= randomState << 5;
+            const auto input = kind == 0
+                ? (static_cast<float>(randomState >> 8) / 8388608.0f - 1.0f) * 0.15f
+                : static_cast<float>(0.15 * std::sin(2.0 * pi * 437.0 * n / rate));
+            const auto out = e.process(input, input);
+            (kind == 0 ? noise : tone)[static_cast<std::size_t>(n)] = out[0];
+            slices = slices && Access::validSlices(e);
+            if (n < rate * 0.04) silentBeforeCapture = silentBeforeCapture && out[0] == 0.0f;
+        }
+    }
+    const int begin = static_cast<int>(rate * 0.06), end = static_cast<int>(rate * 0.3);
+    double noiseCorrelation = 0.0;
+    // The old 5 ms startup capture had a seam of min(2 ms, capture/4),
+    // so its manufactured loop period depended on sample-rate rounding.
+    for (int lag = static_cast<int>(rate * 0.0025); lag <= rate * 0.005; ++lag)
+        noiseCorrelation = std::max(noiseCorrelation, std::abs(lagCorrelation(noise, begin, end, lag)));
+    const auto toneCorrelation = lagCorrelation(tone, begin, end, static_cast<int>(std::lround(rate / 437.0)));
+    CHECK(silentBeforeCapture, "new triggers wait for safe source capture instead of looping their first 5 ms");
+    CHECK(slices, "every active grain reads a contiguous fully written source slice without internal wrapping");
+    CHECK(std::abs(noiseCorrelation) < 0.25,
+          "triggered broadband noise has no artificial stationary short-capture repetition tone");
+    CHECK(toneCorrelation > 0.85,
+          "off-grid 437 Hz input retains its pitch through grain onset instead of becoming a short-loop chord");
+    CHECK(Access::parameters(e).grainMinMs == 1000.0f,
+          "capture limits effective lengths without changing the requested GRAIN setting");
+    std::printf("Onset regression: maximum noise short-loop correlation %.5f; 437Hz period correlation %.5f\n",
+                noiseCorrelation, toneCorrelation);
+}
+
+void testMassPanAndCaptureBoundaries() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    GrainEngine single, dense, left, right;
+    single.prepare(8000.0); dense.prepare(8000.0); left.prepare(8000.0); right.prepare(8000.0);
+    auto p = base();
+    p.mode = 0; p.scatterMs = 250.0f;
+    p.grainMinMs = p.grainMaxMs = 100.0f;
+    p.swayAmountMinPercent = p.swayAmountMaxPercent = 0.0f;
+    p.attackMinMs = p.attackMaxMs = 40.0f;
+    single.setParameters(p); single.reset();
+    p.mass = 8; dense.setParameters(p); dense.reset();
+    p.panMinPercent = p.panMaxPercent = -100.0f;
+    left.setParameters(p); left.reset();
+    p.panMinPercent = p.panMaxPercent = 100.0f;
+    right.setParameters(p); right.reset();
+    bool bounded = true, slices = true, stereo = true, correctSides = true;
+    double levelDifference = 0.0;
+    std::size_t peakGrains = 0;
+    callbackAllocations = 0;
+    trackAllocation = true;
+    for (int n = 0; n < 8000 * 27; ++n) {
+        const auto a = single.process(0.2f, -0.1f);
+        const auto b = dense.process(0.2f, -0.1f);
+        const auto l = left.process(0.2f, -0.1f);
+        const auto r = right.process(0.2f, -0.1f);
+        const auto active = Access::activeGrains(dense);
+        peakGrains = std::max(peakGrains, active);
+        bounded = bounded && active <= GrainEngine::maxGrainsPerEvent;
+        slices = slices && Access::validSlices(dense);
+        if (n > 800) {
+            levelDifference = std::max(levelDifference, static_cast<double>(std::abs(a[0] - b[0])));
+            stereo = stereo && std::abs(b[0] - 0.2f) < 0.002f && std::abs(b[1] + 0.1f) < 0.002f;
+            correctSides = correctSides && std::abs(l[1]) < 1.0e-6f && std::abs(r[0]) < 1.0e-6f;
+        }
+    }
+    trackAllocation = false;
+    CHECK(peakGrains >= 12 && bounded, "MASS8 creates parallel overlapping streams within the fixed grain budget");
+    CHECK(levelDifference < 0.002 && stereo,
+          "increasing centered MASS preserves stereo channels and the original constant-input level");
+    CHECK(correctSides, "PAN range endpoints pan individual grains fully to the selected stereo side");
+    CHECK(slices, "live grains remain within written history after the capture ring wraps");
+    CHECK(callbackAllocations.load() == 0, "MASS8 and PAN rendering allocate no audio-thread memory");
+
+    p = base(); p.mode = 0; p.mass = 8; p.panMinPercent = -100; p.panMaxPercent = 100;
+    p.motionMode = 0; p.duckPreviousPercent = 0;
+    const auto first = deterministicRender(single, p, 64, 77123);
+    p.motionMode = 1; p.undulationMinPercent = -100; p.undulationMaxPercent = 100;
+    p.duckPreviousPercent = 100;
+    const auto second = deterministicRender(single, p, 511, 77123);
+    CHECK(std::memcmp(first.data(), second.data(), first.size() * sizeof(Stereo)) == 0,
+          "NONE always uses SWAY and ignores UNDULATION and DUCK PRV while retaining exact reset determinism");
+    p = base(); p.durationMinimumMs = 15.0f; p.durationMaximumMs = 24000.0f;
+    p.scatterMs = 24000.0f; p.grainMinMs = p.grainMaxMs = 15000.0f;
+    p.attackMinMs = p.attackMaxMs = 15.0f;
+    dense.setParameters(p);
+    const auto synced = Access::parameters(dense);
+    CHECK(synced.grainMinMs == 15000.0f && synced.attackMinMs == 15.0f,
+          "sync-resolved durations retain their expanded millisecond domain");
+}
+
+void testFrozenBufferAutomationAndDirtyResets() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    GrainEngine e;
+    e.prepare(rate);
+    auto p = base(); p.mode = 3;
+    p.scatterMs = 500.0f; p.grainMinMs = p.grainMaxMs = 300.0f;
+    p.attackMinMs = p.attackMaxMs = 40.0f;
+    e.setParameters(p); e.reset();
+    for (int n = 0; n < static_cast<int>(rate); ++n) e.process(0.2f, 0.2f);
+    auto previous = Access::firstEvent(e);
+    p.scatterMs = 40.0f;
+    e.setParameters(p);
+    bool capped = true;
+    int newGrains = 0;
+    for (int n = 0; n < static_cast<int>(rate * 0.4); ++n) {
+        e.process(0.2f, 0.2f);
+        const auto current = Access::firstEvent(e);
+        if (current.grainSerial != previous.grainSerial) {
+            ++newGrains;
+            capped = capped && current.previousGrain <= rate * 0.04 + 1;
+        }
+        previous = current;
+    }
+    CHECK(newGrains >= 3 && capped,
+          "lowering BUFFER caps newly launched grains in an already-frozen held event");
+    CHECK(Access::parameters(e).grainMinMs == 300.0f,
+          "BUFFER automation preserves the requested GRAIN value");
+    p = base(); p.mass = 8; p.panMinPercent = -100; p.panMaxPercent = 100;
+    e.setParameters(p); e.reset(12345); e.noteOn();
+    bool silent = true;
+    for (int n = 0; n < static_cast<int>(rate); ++n) {
+        const auto out = e.process(0.0f, 0.0f);
+        silent = silent && out[0] == 0.0f && out[1] == 0.0f;
+    }
+    CHECK(silent, "reset with previously filled capture storage cannot leak stale audio into silence");
+    p.mode = 0; p.mass = 1;
+    const auto sparse = deterministicRender(e, p, 64, 778899);
+    p.mass = 8;
+    const auto dense = deterministicRender(e, p, 127, 778899);
+    double difference = 0.0;
+    for (std::size_t n = 0; n < sparse.size(); ++n)
+        difference += std::abs(sparse[n].left - dense[n].left);
+    CHECK(difference > 1.0,
+          "parallel MASS streams choose independent source starts and audibly change nonconstant input");
+}
+
+void testSyncPicksStayOnMusicalGrid() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    namespace Timing = InhaGrain::Timing;
+    GrainEngine e;
+    constexpr double lowRate = 8000.0;
+    e.prepare(lowRate);
+    bool eventGrid = true, grainGrid = true, slices = true;
+    int launched = 0;
+    for (const float bpm : { 20.0f, 123.0f, 999.0f }) {
+        auto p = base(); p.synced = true; p.tempoBpm = bpm; p.mass = 8;
+        p.durationMinimumMs = static_cast<float>(Timing::minimumDuration(true, bpm));
+        p.durationMaximumMs = static_cast<float>(Timing::maximumDuration(true, bpm));
+        p.scatterMs = p.durationMaximumMs;
+        p.attackMinMs = p.releaseMinMs = p.grainMinMs = p.durationMinimumMs;
+        p.attackMaxMs = p.releaseMaxMs = p.grainMaxMs = p.durationMaximumMs;
+        e.setParameters(p); e.reset(123456); e.noteOn();
+        const auto onGrid = [bpm](std::uint64_t frames) {
+            for (std::size_t step = 0; step < Timing::beats.size(); ++step) {
+                const auto grid = static_cast<std::uint64_t>(std::llround(
+                    Timing::syncMilliseconds(Timing::syncNormalized(step), bpm) * lowRate * 0.001));
+                if (grid == frames) return true;
+            }
+            return false;
+        };
+        auto previous = Access::firstEvent(e);
+        for (int n = 0; n < 24000; ++n) {
+            e.process(0.2f, 0.2f);
+            const auto current = Access::firstEvent(e);
+            if (current.active) eventGrid = eventGrid && onGrid(current.attack) && onGrid(current.release);
+            if (current.active && current.grainSerial != previous.grainSerial) {
+                ++launched;
+                grainGrid = grainGrid && onGrid(current.previousGrain);
+            }
+            slices = slices && Access::validSlices(e);
+            previous = current;
+        }
+    }
+    CHECK(launched > 20 && eventGrid,
+          "SYNC random attack/release picks select actual musical grid durations at slow and fast tempos");
+    CHECK(grainGrid && slices,
+          "SYNC grains stay on musical durations while startup capture and BUFFER cap their effective length");
+}
+
 void testLongUnequalGrainOverlap() {
     GrainEngine e;
     constexpr double lowRate = 8000.0;
@@ -420,7 +650,8 @@ void testLongUnequalGrainOverlap() {
     p.grainMaxMs = 10000.0;
     p.envMinPercent = p.envMaxPercent = 0.0;
     p.undulationMinPercent = p.undulationMaxPercent = 0.0;
-    p.scatterMs = 50.0;
+    p.scatterMs = 6000.0;
+    p.mass = 8;
     e.setParameters(p); e.reset();
     float previous = 0.2f;
     double minimum = 1.0, maximum = -1.0, largestStep = 0.0;
@@ -481,7 +712,9 @@ void testEventGrainQuantileAndUndulation() {
     GrainEngine e;
     e.prepare(lowRate);
     auto p = base();
-    p.mode = 0;
+    p.mode = 3; // Held triggered event permits UNDULATION.
+    p.scatterMs = 2000.0;
+    p.swayAmountMinPercent = p.swayAmountMaxPercent = 0.0f;
     p.grainMinMs = 100.0;
     p.grainMaxMs = 400.0;
     p.attackMinMs = p.attackMaxMs = 500.0;
@@ -503,8 +736,8 @@ void testEventGrainQuantileAndUndulation() {
         if (after.grainSerial != before.grainSerial) {
             if (quantile < 0.0f) quantile = after.grainQuantile;
             fixedQuantile = fixedQuantile && quantile == after.grainQuantile;
-            const double expected = p.grainMinMs +
-                (p.grainMaxMs - p.grainMinMs) * quantile;
+            const double expected = std::min<double>(after.written * 1000.0 / lowRate,
+                p.grainMinMs + (p.grainMaxMs - p.grainMinMs) * quantile);
             const double actual = after.previousGrain * 1000.0 / lowRate;
             mappedSize = mappedSize && std::abs(expected - actual) <= 0.13;
             ++observedGrains;
@@ -531,12 +764,13 @@ void testEventGrainQuantileAndUndulation() {
             if (after.grainSerial != before.grainSerial) {
                 const double durationSamples = (after.attack + after.release) * (speed * 0.01);
                 const double progress = std::clamp((after.age - 1.0) / durationSamples, 0.0, 1.0);
-                const double expected = 500.0 + (10000.0 - 500.0) * 0.05 * progress;
+                const double expected = std::min<double>(after.written * 1000.0 / lowRate,
+                    500.0 + (6000.0 - 500.0) * 0.05 * progress);
                 const double actual = after.previousGrain * 1000.0 / lowRate;
                 durationMapping = durationMapping && std::abs(expected - actual) <= 0.13;
                 if (progress == 1.0) {
                     reached = true;
-                    durationMapping = durationMapping && std::abs(actual - 975.0) <= 0.13;
+                    durationMapping = durationMapping && std::abs(actual - 775.0) <= 0.13;
                 }
             }
             before = after;
@@ -556,7 +790,8 @@ void testEventGrainQuantileAndUndulation() {
         for (int n = 0; n < static_cast<int>(lowRate * 6.0); ++n) {
             e.process(0.2f, 0.2f);
             const auto after = Access::firstEvent(e);
-            if (after.grainSerial != before.grainSerial && before.previousGrain != 0) {
+            if (after.grainSerial != before.grainSerial && before.previousGrain != 0 &&
+                after.age > lowRate * 0.6) {
                 directionCorrect = directionCorrect && (amount < 0.0f
                     ? after.previousGrain <= before.previousGrain
                     : after.previousGrain >= before.previousGrain);
@@ -709,7 +944,8 @@ void testSwayZeroDepthAndBaseAutomation() {
     constexpr double lowRate = 8000.0;
     sway.prepare(lowRate);
     p.mode = 0;
-    p.attackMinMs = p.attackMaxMs = 1.0f;
+    p.scatterMs = 2000.0f;
+    p.attackMinMs = p.attackMaxMs = 40.0f;
     p.grainMinMs = p.grainMaxMs = 400.0f;
     p.swayAmountMinPercent = p.swayAmountMaxPercent = 20.0f;
     p.swaySpeedMinMs = 40.0f; p.swaySpeedMaxMs = 80.0f;
@@ -724,7 +960,8 @@ void testSwayZeroDepthAndBaseAutomation() {
             p.grainMinMs = p.grainMaxMs = 500.0f;
             sway.setParameters(p);
         }
-        const double desired = p.grainMinMs * (1.0 + Access::swayAt(sway, origin + n));
+        const double desired = std::min((n + 1.0) * 1000.0 / lowRate,
+            p.grainMinMs * (1.0 + Access::swayAt(sway, origin + n)));
         sway.process(0.2f, 0.2f);
         const auto event = Access::firstEvent(sway);
         if (event.grainSerial != previous.grainSerial) {
@@ -835,6 +1072,10 @@ int main() {
     testEventEnvelopeShape();
     testAutomationContinuity();
     testShortCaptureLoopSeams();
+    testTriggerDoesNotManufactureTinyLoopTones();
+    testMassPanAndCaptureBoundaries();
+    testFrozenBufferAutomationAndDirtyResets();
+    testSyncPicksStayOnMusicalGrid();
     testLongUnequalGrainOverlap();
     testBypassPreservesInterstagePeaks();
     testEventGrainQuantileAndUndulation();
