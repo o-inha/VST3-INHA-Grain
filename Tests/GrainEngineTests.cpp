@@ -612,7 +612,7 @@ void testSyncPicksStayOnMusicalGrid() {
         p.attackMinMs = p.releaseMinMs = p.grainMinMs = p.durationMinimumMs;
         p.attackMaxMs = p.releaseMaxMs = p.grainMaxMs = p.durationMaximumMs;
         e.setParameters(p); e.reset(123456); e.noteOn();
-        const auto onGrid = [bpm](std::uint64_t frames) {
+        const auto onGrid = [bpm, lowRate](std::uint64_t frames) {
             for (std::size_t step = 0; step < Timing::beats.size(); ++step) {
                 const auto grid = static_cast<std::uint64_t>(std::llround(
                     Timing::syncMilliseconds(Timing::syncNormalized(step), bpm) * lowRate * 0.001));
