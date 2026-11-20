@@ -48,12 +48,12 @@ jobs:
           if (Get-ChildItem build/dist -Recurse -File | Where-Object { $_.Name -match 'Fixture|licen[cs]e\.key|licence\.key' }) { throw "Unexpected fixture or key in release" }
           $bytes = [IO.File]::ReadAllBytes("build/dist/INHA Grain.vst3/Contents/x86_64-win/INHA Grain.vst3")
           $ascii = [Text.Encoding]::ASCII.GetString($bytes)
-          foreach ($id in @('inha-grain', 'INHA-Grain-device-v1:', '0.3.0')) { if (-not $ascii.Contains($id)) { throw "Missing Grain identity: $id" } }
+          foreach ($id in @('inha-grain', 'INHA-Grain-device-v1:', '0.3.1')) { if (-not $ascii.Contains($id)) { throw "Missing Grain identity: $id" } }
       - name: Record build validation
         shell: pwsh
         run: |
           @"
-          INHA Grain 0.3.0 - Windows x64 VST3
+          INHA Grain 0.3.1 - Windows x64 VST3
           Source commit: ${{ github.sha }}
           Build: MSVC Release, static C++ runtime
           SDK: Steinberg VST3 3.7.14 build 55

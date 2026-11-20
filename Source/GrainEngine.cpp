@@ -360,14 +360,15 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
     const auto minimum = std::min (parameters_.grainMinMs, parameters_.grainMaxMs);
     const auto maximum = std::max (parameters_.grainMinMs, parameters_.grainMaxMs);
     double size = minimum + (maximum - minimum) * event.grainQuantile;
-    if (parameters_.mode == 0 || parameters_.motionMode == 1)
+    const auto undulating = parameters_.mode != 0 && parameters_.motionMode == 0;
+    if (!undulating)
         size *= 1.0 + swayValue (timeline_);
     else
     {
         const auto progress = std::clamp (static_cast<double> (event.age) /
             (static_cast<double> (event.attack + event.release) * event.speed), 0.0, 1.0);
         const auto destination = event.undulation < 0.0f
-            ? parameters_.durationMinimumMs : parameters_.durationMaximumMs;
+            ? minimum : parameters_.durationMaximumMs;
         size += (destination - size) * std::abs (event.undulation) * progress;
     }
     size = std::clamp (size, static_cast<double> (parameters_.durationMinimumMs),
@@ -379,6 +380,16 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
     if (previous != 0)
         duration = std::min<std::uint32_t> (static_cast<std::uint32_t> (available),
             std::clamp (duration, std::max<std::uint32_t> (2, previous / 2), previous * 2));
+    if (undulating)
+    {
+        // The chosen GRAIN minimum is also UNDULATION's floor. Apply it
+        // after the transition slew so raising the handle cannot launch new
+        // grains below that setting once enough source has been captured.
+        const auto floorMs = parameters_.synced
+            ? Timing::quantizeMilliseconds (minimum, parameters_.tempoBpm) : minimum;
+        const auto floor = std::min (available, samplesForMs (floorMs));
+        duration = std::max (duration, static_cast<std::uint32_t> (floor));
+    }
     if (parameters_.synced)
     {
         // Compare integer frames, so rounding a beat to the sample grid cannot

@@ -1,7 +1,7 @@
 # INHA Grain
 
 Windows x64 VST3 insert effect for captured granular textures. Development
-version: **0.3.0**. Built on INHA Core 0.1.2 and the native INHA editor family.
+version: **0.3.1**. Built on INHA Core 0.1.2 and the native INHA editor family.
 
 ## Getting started
 
@@ -30,7 +30,7 @@ Two values under a control are the lower/upper bounds of a seeded random range.
 | SYNC | Tempo-synced BUFFER, GRAIN, A, R and SWAY SPEED, from 1/16 note to two 4/4 bars |
 | ENV | Grain-window range: 0% triangle, 50% sine, 100% rounded square |
 | UNDULATION / SWAY tabs | Select event-shaped movement or continuous smooth random movement; each tab retains independent AMOUNT/SPEED settings |
-| UNDULATION AMOUNT | Signed grain-size movement within the current duration domain: negative toward 5 ms, positive toward 10 seconds, zero steady |
+| UNDULATION AMOUNT | Signed grain-size movement: negative toward the selected GRAIN minimum, positive toward the current duration upper limit, zero steady; BUFFER caps the effective size |
 | UNDULATION SPEED | Duration as a percentage of the event's chosen attack + release; 50% means half their sum, 200% twice it |
 | SWAY AMOUNT | Depth range relative to the current event's base grain size, 0–100%; 20% permits approximately 80–120% of that size |
 | SWAY SPEED | Time range between smooth random targets; independent of event attack/release |
@@ -57,7 +57,11 @@ Raising BUFFER restores the previously requested range automatically.
 ## Grain-size motion
 
 **UNDULATION** keeps the original behavior: each event chooses a signed amount
-and duration, then gradually moves its grain size in that direction.
+and duration, then gradually moves its grain size in that direction. Negative
+amounts approach the lower of the two GRAIN values, instead of the global
+minimum duration. The selected minimum follows GRAIN automation and tempo
+sync. Positive amounts continue toward the upper duration limit. BUFFER and
+the audio already captured always bound the effective grain size.
 
 **SWAY** is smooth random modulation. Its clock follows the DAW timeline and
 continues across notes, transients and gaps; new events do not restart it.
@@ -116,6 +120,12 @@ start/history. Audio captures and detector histories are live DSP state: seeking
 into the middle of a recording cannot reconstruct audio the plug-in has never
 received. Discontinuous transport and playback restarts reset that history. Use the same preroll for
 identical renders. Refreshing SEED intentionally changes the result.
+
+## Changes in 0.3.1
+
+- UNDULATION now uses the selected GRAIN minimum as its lower endpoint and
+  lower bound, including when that minimum is automated or tempo-synced.
+- Shorter BUFFER/captured source still takes precedence for safe audio reads.
 
 ## Changes in 0.3.0
 

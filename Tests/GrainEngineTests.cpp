@@ -782,6 +782,7 @@ void testEventGrainQuantileAndUndulation() {
     CHECK(reachedDestination, "sustained events reach the destination after each requested undulation duration");
 
     bool directionCorrect = true;
+    p.grainMinMs = 100.0f; p.grainMaxMs = 500.0f;
     for (const float amount : { -100.0f, 100.0f }) {
         p.undulationMinPercent = p.undulationMaxPercent = amount;
         p.speedMinPercent = p.speedMaxPercent = 100.0;
@@ -800,6 +801,81 @@ void testEventGrainQuantileAndUndulation() {
         }
     }
     CHECK(directionCorrect, "signed UNDULATION changes grain size monotonically in the selected direction");
+}
+
+void testUndulationUsesSelectedGrainMinimum() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    namespace Timing = InhaGrain::Timing;
+    constexpr double lowRate = 8000.0;
+    GrainEngine e;
+    e.prepare(lowRate);
+    struct Result { std::uint32_t endpoint = 0; float quantile = 0.0f; };
+    const auto render = [&](float lower, float upper, float amount, float buffer,
+                            bool synced, float raisedMinimum = 0.0f) {
+        auto p = base();
+        p.mode = 3; p.motionMode = 0;
+        p.scatterMs = buffer;
+        p.grainMinMs = lower; p.grainMaxMs = upper;
+        p.attackMinMs = p.attackMaxMs = 300.0f;
+        p.releaseMinMs = p.releaseMaxMs = 700.0f;
+        p.speedMinPercent = p.speedMaxPercent = 100.0f;
+        p.undulationMinPercent = p.undulationMaxPercent = amount;
+        p.synced = synced; p.tempoBpm = 120.0f;
+        if (synced) {
+            p.durationMinimumMs = static_cast<float>(Timing::minimumDuration(true, p.tempoBpm));
+            p.durationMaximumMs = static_cast<float>(Timing::maximumDuration(true, p.tempoBpm));
+        }
+        e.setParameters(p); e.reset(987654);
+        auto previous = Access::firstEvent(e);
+        bool floorHolds = true, valid = true, raisedImmediately = raisedMinimum == 0.0f;
+        Result result;
+        for (int n = 0; n < static_cast<int>(lowRate * 8.0); ++n) {
+            if (raisedMinimum != 0.0f && n == static_cast<int>(lowRate * 3.0)) {
+                p.grainMinMs = raisedMinimum;
+                e.setParameters(p);
+            }
+            e.process(0.2f, 0.2f);
+            const auto current = Access::firstEvent(e);
+            if (current.grainSerial != previous.grainSerial) {
+                const auto selected = std::min(p.grainMinMs, p.grainMaxMs);
+                const auto floorMs = synced
+                    ? Timing::quantizeMilliseconds(selected, p.tempoBpm) : selected;
+                const auto floor = static_cast<std::uint64_t>(std::llround(floorMs * lowRate * 0.001));
+                const auto available = std::min(current.written,
+                    static_cast<std::uint64_t>(std::llround(buffer * lowRate * 0.001)));
+                if (available >= floor)
+                    floorHolds = floorHolds && current.previousGrain >= floor;
+                if (raisedMinimum != 0.0f && n >= lowRate * 3.0 && !raisedImmediately) {
+                    raisedImmediately = current.previousGrain >= floor;
+                    CHECK(raisedImmediately,
+                          "automating the UNDULATION minimum upward applies its floor to the next grain despite duration slew");
+                }
+                result = { current.previousGrain, current.grainQuantile };
+            }
+            valid = valid && Access::validSlices(e);
+            previous = current;
+        }
+        CHECK(floorHolds, "UNDULATION in either direction never undershoots the selected GRAIN minimum once captured");
+        CHECK(valid, "selected-minimum UNDULATION retains contiguous fully captured source reads");
+        CHECK(raisedImmediately, "minimum automation regression observes a newly launched grain");
+        return result;
+    };
+    const auto small = render(250.0f, 1800.0f, -100.0f, 6000.0f, false);
+    const auto large = render(900.0f, 1800.0f, -100.0f, 6000.0f, false);
+    const auto reversed = render(1800.0f, 900.0f, -100.0f, 6000.0f, false);
+    CHECK(small.endpoint == 2000 && large.endpoint == 7200 && reversed.endpoint == 7200,
+          "falling UNDULATION ends at the selected250/900ms GRAIN minimum and handles reversed range endpoints");
+    CHECK(small.quantile == large.quantile && large.quantile == reversed.quantile,
+          "changing the UNDULATION floor preserves the event's seeded random starting quantile");
+    const auto capped = render(900.0f, 1800.0f, -100.0f, 300.0f, false);
+    CHECK(capped.endpoint == 2400, "BUFFER shorter than the selected minimum still caps effective UNDULATION grain length");
+    const auto rising = render(900.0f, 1800.0f, 100.0f, 6000.0f, false);
+    CHECK(rising.endpoint == 48000, "rising UNDULATION retains the existing upper timing-domain destination");
+    const auto automated = render(250.0f, 1800.0f, -100.0f, 6000.0f, false, 900.0f);
+    CHECK(automated.endpoint == 7200, "raising the selected minimum updates an already-running falling UNDULATION endpoint");
+    const auto synced = render(500.0f, 2000.0f, -100.0f, 4000.0f, true, 2000.0f);
+    CHECK(synced.endpoint == 16000, "SYNC falling UNDULATION uses the selected musical GRAIN minimum after automation");
+    render(900.0f, 1800.0f, 40.0f, 6000.0f, false);
 }
 
 void testSwayTimelineAndRange() {
@@ -1079,6 +1155,7 @@ int main() {
     testLongUnequalGrainOverlap();
     testBypassPreservesInterstagePeaks();
     testEventGrainQuantileAndUndulation();
+    testUndulationUsesSelectedGrainMinimum();
     testSwayTimelineAndRange();
     testSwayAudioDeterminism();
     testSwaySpeedAndSmoothness();

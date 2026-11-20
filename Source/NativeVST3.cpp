@@ -1343,10 +1343,10 @@ void NativeView::updateFooterTooltips()
     const std::array<const wchar_t*, 4> motionLabels {{
         owner.plain(triggerMode)<0.5
             ? L"UNDULATION is unavailable with trigger NONE. SWAY supplies continuous grain-size movement."
-            : L"UNDULATION: one-way grain-size movement during each event. Negative AMOUNT shrinks grains; positive AMOUNT grows them. SPEED is a percentage of the event's attack + release duration.",
+            : L"UNDULATION: one-way grain-size movement during each event. Negative AMOUNT moves toward the selected GRAIN minimum; positive AMOUNT moves toward the duration upper limit. BUFFER caps the resulting grain size. SPEED is a percentage of the event's attack + release duration.",
         L"SWAY: continuous movement toward seeded random grain-size targets on the DAW timeline. AMOUNT is relative to the base grain size. SPEED is time between targets, independent of attack and release.",
         sway ? L"SWAY AMOUNT: depth relative to the base grain size. 20% allows targets from 80% to 120% of that size. The two handles set the randomized depth range."
-             : L"UNDULATION AMOUNT: signed grain-size movement for each event. Negative shrinks; positive grows. The two handles set the randomized amount range.",
+             : L"UNDULATION AMOUNT: signed grain-size movement for each event. Negative moves toward the selected GRAIN minimum; positive moves toward the duration upper limit. BUFFER caps the resulting grain size. The two handles set the randomized amount range.",
         sway ? L"SWAY SPEED: time between new random targets, in milliseconds / seconds. Independent of event attack and release. The two handles set the duration range."
              : L"UNDULATION SPEED: duration as a percentage of the event's attack + release. 100% uses their combined duration; 200% takes twice as long."
     }};
