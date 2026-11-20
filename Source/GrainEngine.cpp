@@ -89,6 +89,9 @@ void GrainEngine::prepare (double sampleRate)
     gainAttack_ = coefficient (3.0, sampleRate_);
     gainRelease_ = coefficient (30.0, sampleRate_);
     setParameters (parameters_);
+    dryTarget_ = dbGain (parameters_.dryDb);
+    wetTarget_ = dbGain (parameters_.wetDb);
+    threshold_ = std::pow (10.0f, parameters_.thresholdDb * 0.05f);
     reset();
 }
 
@@ -225,6 +228,10 @@ GrainEngine::Event* GrainEngine::startEvent (bool live, bool held,
                              parameters_.undulationMaxPercent, key, 3) * 0.01f;
     event.speed = pick (parameters_.speedMinPercent,
                         parameters_.speedMaxPercent, key, 4) * 0.01f;
+    // Each event keeps its location within the GRAIN range. Moving either
+    // endpoint still automates running events, without rerolling grain size
+    // and fighting the direction of the event's undulation.
+    event.grainQuantile = random (key, 5);
     event.pressureGain = 1.0f;
     event.pressureRemaining = 0;
     for (auto& grain : event.grains)
@@ -258,7 +265,9 @@ void GrainEngine::launchGrain (Event& event) noexcept
     }
     const auto serial = event.grainSerial++;
     const auto key = hash (event.key ^ hash (serial + 0x10000));
-    double size = pick (parameters_.grainMinMs, parameters_.grainMaxMs, key, 10);
+    const auto minimum = std::min (parameters_.grainMinMs, parameters_.grainMaxMs);
+    const auto maximum = std::max (parameters_.grainMinMs, parameters_.grainMaxMs);
+    double size = minimum + (maximum - minimum) * event.grainQuantile;
     const auto progress = std::clamp (static_cast<double> (event.age) /
         (static_cast<double> (event.attack + event.release) * event.speed), 0.0, 1.0);
     const auto destination = event.undulation < 0.0f ? 5.0 : 10000.0;
@@ -393,10 +402,16 @@ std::array<float, 2> GrainEngine::renderEvent (Event& event) noexcept
         if (++grain.age >= grain.duration)
             grain.active = false;
     }
-    // Normalize the overlapping windows, never an isolated fade-in. This is
-    // a partition of unity at steady state, including sine/square curves and
-    // changing grain lengths; a DC source therefore has no window tremolo.
-    const auto gain = event.envelope * event.pressureGain / std::max (1.0f, weight);
+    // Normalize the actual window sum, even when unequal grain lengths make
+    // it smaller than one. A separate startup ramp preserves a smooth onset;
+    // relying on the first grain's window would cancel that fade during
+    // normalization. Event release/retirement supplies the smooth ending.
+    const auto startup = samplesForMs (5);
+    const auto elapsed = event.age > startup ? event.age - startup : 0;
+    const auto startupGain = smoothstep (static_cast<float> (elapsed) /
+                                         static_cast<float> (startup));
+    const auto gain = event.envelope * event.pressureGain * startupGain /
+                      std::max (1.0e-12f, weight);
     output[0] *= gain;
     output[1] *= gain;
     ++event.age;
@@ -516,7 +531,14 @@ std::array<float, 2> GrainEngine::process (float left, float right) noexcept
     dryGain_ += (dryTarget_ - dryGain_) * gainAttack_;
     wetGain_ += (wetTarget_ - wetGain_) * gainAttack_;
     const auto bypassTarget = parameters_.bypass ? 1.0f : 0.0f;
+    const auto previousBypassMix = bypassMix_;
     bypassMix_ += (bypassTarget - bypassMix_) * gainAttack_;
+    // Float smoothing may stop advancing several ULPs from the target,
+    // especially at high sample rates. Snap when it stalls so full bypass
+    // becomes mathematically exact rather than retaining a tiny wet leak.
+    if (std::abs (bypassTarget - bypassMix_) < 0.000001f ||
+        bypassMix_ == previousBypassMix)
+        bypassMix_ = bypassTarget;
     const auto wetActivity = std::max (std::abs (wet[0]), std::abs (wet[1])) * wetGain_;
     activity_ += (wetActivity - activity_) * (wetActivity > activity_ ? gainAttack_ : gainRelease_);
     std::array<float, 2> result;
@@ -525,7 +547,10 @@ std::array<float, 2> GrainEngine::process (float left, float right) noexcept
     {
         const auto processed = dry[channel] * dryGain_ * dryDuck_ +
             wet[channel] * wetGain_ * wetBudgetGain_;
-        result[channel] = protect (processed * (1.0f - bypassMix_) + dry[channel] * bypassMix_);
+        // Peak protection belongs to the effected branch. Full bypass must
+        // preserve the original input, including legitimate interstage peaks.
+        result[channel] = protect (processed) * (1.0f - bypassMix_) +
+                          dry[channel] * bypassMix_;
     }
     if (timeline_ < std::numeric_limits<std::int64_t>::max())
         ++timeline_;

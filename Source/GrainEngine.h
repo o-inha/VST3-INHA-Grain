@@ -40,11 +40,13 @@ public:
     void setParameters (const Parameters&) noexcept;
     void noteOn() noexcept;
     std::array<float, 2> process (float left, float right) noexcept;
-    bool isActive() const noexcept { return activity_ > 0.00001f; }
+    bool isActive() const noexcept { return activity_ * (1.0f - bypassMix_) > 0.00001f; }
+    float bypassMix() const noexcept { return bypassMix_; }
     std::size_t memoryBytes() const noexcept;
     std::size_t activeEvents() const noexcept;
 
 private:
+    friend struct GrainEngineTestAccess;
     struct Grain
     {
         bool active = false;
@@ -65,6 +67,7 @@ private:
         std::int64_t nextGrain = 0;
         float releaseStart = 1.0f, envelope = 0.0f;
         float undulation = 0.0f, speed = 1.0f;
+        float grainQuantile = 0.0f;
         float pressureGain = 1.0f;
         std::uint32_t pressureRemaining = 0, pressureTotal = 1;
         std::array<Grain, maxGrainsPerEvent> grains {};

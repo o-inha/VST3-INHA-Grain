@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 project(INHAGrain VERSION 0.1.0 LANGUAGES CXX)
 
+# Ship a self-contained Windows binary without a Visual C++ redistributable.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 set(INHA_CORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(Dependencies/INHA-Core)
 include(Dependencies/INHA-Core/cmake/InhaPlugin.cmake)
@@ -50,6 +55,10 @@ if(INHA_PLUGIN_BUILD_TESTS)
     target_link_libraries(GrainEngineTests PRIVATE GrainEngine)
     target_compile_features(GrainEngineTests PRIVATE cxx_std_17)
     add_test(NAME GrainEngineTests COMMAND GrainEngineTests)
+    add_executable(GrainAutomationTests Tests/AutomationTimelineTests.cpp)
+    target_include_directories(GrainAutomationTests PRIVATE Source)
+    target_compile_features(GrainAutomationTests PRIVATE cxx_std_17)
+    add_test(NAME GrainAutomationTests COMMAND GrainAutomationTests)
     if(WIN32 AND INHA_PLUGIN_BUILD_VST3)
         add_library(GrainEditorFixture MODULE ${GRAIN_PLUGIN_SOURCES} Tests/EditorTestLicense.cpp)
         target_compile_features(GrainEditorFixture PRIVATE cxx_std_17)

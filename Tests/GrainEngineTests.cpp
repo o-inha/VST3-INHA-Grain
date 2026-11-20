@@ -28,6 +28,28 @@ void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
+namespace InhaGrain {
+// Read-only inspection of scheduling values avoids guessing grain sizes from
+// the spectrum of a random audio texture. The engine grants this test fixture
+// friendship without adding a product API or work to the audio callback.
+struct GrainEngineTestAccess {
+    struct EventState {
+        bool active = false;
+        std::uint64_t age = 0, attack = 0, release = 0, grainSerial = 0;
+        std::uint32_t previousGrain = 0;
+        float grainQuantile = 0.0f, undulation = 0.0f, speed = 0.0f;
+    };
+    static EventState firstEvent(const GrainEngine& engine) {
+        for (const auto& event : engine.events_) {
+            if (!event.active) continue;
+            return { true, event.age, event.attack, event.release, event.grainSerial,
+                     event.previousGrain, event.grainQuantile, event.undulation, event.speed };
+        }
+        return {};
+    }
+};
+}
+
 namespace {
 using InhaGrain::GrainEngine;
 using InhaGrain::Parameters;
@@ -378,6 +400,164 @@ void testShortCaptureLoopSeams() {
     CHECK(largestStep < 0.08, "long grains smooth the repeated seams of a much shorter capture buffer");
 }
 
+void testLongUnequalGrainOverlap() {
+    GrainEngine e;
+    constexpr double lowRate = 8000.0;
+    e.prepare(lowRate);
+    auto p = base();
+    p.mode = 0;
+    p.attackMinMs = p.attackMaxMs = 1.0;
+    p.grainMinMs = 5.0;
+    p.grainMaxMs = 10000.0;
+    p.envMinPercent = p.envMaxPercent = 0.0;
+    p.undulationMinPercent = p.undulationMaxPercent = 0.0;
+    p.scatterMs = 50.0;
+    e.setParameters(p); e.reset();
+    float previous = 0.2f;
+    double minimum = 1.0, maximum = -1.0, largestStep = 0.0;
+    for (int n = 0; n < static_cast<int>(lowRate * 90.0); ++n) {
+        if (n > lowRate * 10.0 && n % 35231 == 0) {
+            // Unequal old/new grain lengths expose window sums below unity.
+            // Alternating the whole domain also exercises the safe duration slew.
+            const int change = n / 35231;
+            p.grainMinMs = change % 3 == 0 ? 5.0 : (change % 3 == 1 ? 10000.0 : 100.0);
+            p.grainMaxMs = change % 3 == 0 ? 5.0 : (change % 3 == 1 ? 10000.0 : 9000.0);
+            p.envMinPercent = p.envMaxPercent = change % 2 ? 0.0 : 100.0;
+            e.setParameters(p);
+        }
+        const auto out = e.process(0.2f, 0.2f);
+        if (n > lowRate * 0.1) {
+            minimum = std::min(minimum, static_cast<double>(out[0]));
+            maximum = std::max(maximum, static_cast<double>(out[0]));
+            largestStep = std::max(largestStep, std::abs(static_cast<double>(out[0] - previous)));
+        }
+        previous = out[0];
+    }
+    CHECK(minimum > 0.198 && maximum < 0.202,
+          "90-second unequal-duration overlap preserves DC gain through extreme GRAIN/ENV changes");
+    CHECK(largestStep < 0.002,
+          "normalizing short and long overlapping grains never adds amplitude steps");
+}
+
+void testBypassPreservesInterstagePeaks() {
+    GrainEngine e;
+    e.prepare(rate);
+    auto p = base();
+    p.bypass = true;
+    p.dryDb = -60.0;
+    p.wetDb = 6.0;
+    p.duckDryPercent = 100.0;
+    e.setParameters(p); e.reset();
+    const std::array<float, 6> peaks {{ 1.2f, -1.8f, 0.12345f, 4.0f, -0.333f, -7.0f }};
+    bool exact = true;
+    for (const auto peak : peaks) {
+        const auto out = e.process(peak, -peak);
+        exact = exact && out[0] == peak && out[1] == -peak;
+    }
+    CHECK(exact, "full bypass preserves exact dry samples above 0 dBFS instead of clipping them");
+    p.bypass = false;
+    e.setParameters(p);
+    for (int n = 0; n < 4000; ++n) e.process(1.2f, -1.8f);
+    p.bypass = true;
+    e.setParameters(p);
+    std::array<float, 2> settled {};
+    for (int n = 0; n < 8000; ++n) settled = e.process(1.2f, -1.8f);
+    CHECK(settled[0] == 1.2f && settled[1] == -1.8f,
+          "automated bypass settles to exact dry peaks after its smooth transition");
+}
+
+void testEventGrainQuantileAndUndulation() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    constexpr double lowRate = 8000.0;
+    GrainEngine e;
+    e.prepare(lowRate);
+    auto p = base();
+    p.mode = 0;
+    p.grainMinMs = 100.0;
+    p.grainMaxMs = 400.0;
+    p.attackMinMs = p.attackMaxMs = 500.0;
+    p.releaseMinMs = p.releaseMaxMs = 1500.0;
+    p.undulationMinPercent = p.undulationMaxPercent = 0.0;
+    p.envMinPercent = p.envMaxPercent = 0.0;
+    e.setParameters(p); e.reset();
+    auto before = Access::firstEvent(e);
+    bool fixedQuantile = true, mappedSize = true;
+    float quantile = -1.0f;
+    int observedGrains = 0;
+    for (int n = 0; n < static_cast<int>(lowRate * 3.0); ++n) {
+        if (n == static_cast<int>(lowRate)) {
+            p.grainMinMs = 200.0; p.grainMaxMs = 500.0;
+            e.setParameters(p);
+        }
+        e.process(0.2f, 0.2f);
+        const auto after = Access::firstEvent(e);
+        if (after.grainSerial != before.grainSerial) {
+            if (quantile < 0.0f) quantile = after.grainQuantile;
+            fixedQuantile = fixedQuantile && quantile == after.grainQuantile;
+            const double expected = p.grainMinMs +
+                (p.grainMaxMs - p.grainMinMs) * quantile;
+            const double actual = after.previousGrain * 1000.0 / lowRate;
+            mappedSize = mappedSize && std::abs(expected - actual) <= 0.13;
+            ++observedGrains;
+        }
+        before = after;
+    }
+    CHECK(observedGrains >= 8, "quantile regression observes several grains before and after automation");
+    CHECK(fixedQuantile, "each event retains its seeded grain-size choice across successive grains");
+    CHECK(mappedSize, "automating GRAIN remaps the existing event quantile instead of rerolling it");
+
+    // With modest undulation the duration slew does not obscure the requested
+    // target. Check the actual launched lengths against A+R times SPEED.
+    bool durationMapping = true, reachedDestination = true;
+    for (const float speed : { 50.0f, 100.0f, 200.0f }) {
+        p.grainMinMs = p.grainMaxMs = 500.0;
+        p.undulationMinPercent = p.undulationMaxPercent = 5.0;
+        p.speedMinPercent = p.speedMaxPercent = speed;
+        e.setParameters(p); e.reset();
+        before = Access::firstEvent(e);
+        bool reached = false;
+        for (int n = 0; n < static_cast<int>(lowRate * 7.0); ++n) {
+            e.process(0.2f, 0.2f);
+            const auto after = Access::firstEvent(e);
+            if (after.grainSerial != before.grainSerial) {
+                const double durationSamples = (after.attack + after.release) * (speed * 0.01);
+                const double progress = std::clamp((after.age - 1.0) / durationSamples, 0.0, 1.0);
+                const double expected = 500.0 + (10000.0 - 500.0) * 0.05 * progress;
+                const double actual = after.previousGrain * 1000.0 / lowRate;
+                durationMapping = durationMapping && std::abs(expected - actual) <= 0.13;
+                if (progress == 1.0) {
+                    reached = true;
+                    durationMapping = durationMapping && std::abs(actual - 975.0) <= 0.13;
+                }
+            }
+            before = after;
+        }
+        reachedDestination = reachedDestination && reached;
+    }
+    CHECK(durationMapping,
+          "UNDULATION duration is A+R multiplied by SPEED50/100/200 percent, with global-domain amount");
+    CHECK(reachedDestination, "sustained events reach the destination after each requested undulation duration");
+
+    bool directionCorrect = true;
+    for (const float amount : { -100.0f, 100.0f }) {
+        p.undulationMinPercent = p.undulationMaxPercent = amount;
+        p.speedMinPercent = p.speedMaxPercent = 100.0;
+        e.setParameters(p); e.reset();
+        before = Access::firstEvent(e);
+        for (int n = 0; n < static_cast<int>(lowRate * 6.0); ++n) {
+            e.process(0.2f, 0.2f);
+            const auto after = Access::firstEvent(e);
+            if (after.grainSerial != before.grainSerial && before.previousGrain != 0) {
+                directionCorrect = directionCorrect && (amount < 0.0f
+                    ? after.previousGrain <= before.previousGrain
+                    : after.previousGrain >= before.previousGrain);
+            }
+            before = after;
+        }
+    }
+    CHECK(directionCorrect, "signed UNDULATION changes grain size monotonically in the selected direction");
+}
+
 void testFloodFiniteAndNoAllocations() {
     GrainEngine e;
     e.prepare(48000.0);
@@ -407,7 +587,7 @@ void testFloodFiniteAndNoAllocations() {
         if (n == 19001) in = std::numeric_limits<float>::infinity();
         const auto out = e.process(in, -in);
         finite = finite && std::isfinite(out[0]) && std::isfinite(out[1]);
-        bounded = bounded && std::abs(out[0]) <= 4.0f && std::abs(out[1]) <= 4.0f;
+        bounded = bounded && std::abs(out[0]) <= 1.00001f && std::abs(out[1]) <= 1.00001f;
         budget = budget && e.activeEvents() <= GrainEngine::maxEvents;
     }
     trackAllocation = false;
@@ -430,6 +610,9 @@ int main() {
     testEventEnvelopeShape();
     testAutomationContinuity();
     testShortCaptureLoopSeams();
+    testLongUnequalGrainOverlap();
+    testBypassPreservesInterstagePeaks();
+    testEventGrainQuantileAndUndulation();
     testFloodFiniteAndNoAllocations();
     if (failures != 0) {
         std::fprintf(stderr, "%d Grain engine check(s) failed.\n", failures);

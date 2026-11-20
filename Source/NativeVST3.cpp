@@ -441,10 +441,24 @@ public:
      if(nextEvent.sampleOffset==i&&nextEvent.type==Event::kNoteOnEvent&&nextEvent.noteOn.velocity>0&&!denied)engine.noteOn();
      ++eventIndex;haveEvent=eventIndex<eventCount&&data.inputEvents->getEvent(eventIndex,nextEvent)==kResultOk;
     }
-    const auto read=[&](int c){if(input.silenceFlags&(uint64{1}<<c))return 0.0f;return data.symbolicSampleSize==kSample32?input.channelBuffers32[c][i]:static_cast<float>(input.channelBuffers64[c][i]);};
-    const float left=read(0),right=channels>1?read(1):left;
-    const auto wet=denied?std::array<float,2>{{left,right}}:engine.process(left,right);
-    for(int c=0;c<channels;++c){if(data.symbolicSampleSize==kSample32)output.channelBuffers32[c][i]=wet[c];else output.channelBuffers64[c][i]=wet[c];}
+    const auto read=[&](int c)->double{
+     if(input.silenceFlags&(uint64{1}<<c))return 0.0;
+     return data.symbolicSampleSize==kSample32?static_cast<double>(input.channelBuffers32[c][i]):input.channelBuffers64[c][i];
+    };
+    const std::array<double,2> raw{{read(0),channels>1?read(1):read(0)}};
+    const std::array<float,2> source{{static_cast<float>(raw[0]),static_cast<float>(raw[1])}};
+    const auto wet=denied?source:engine.process(source[0],source[1]);
+    const float bypassMix=denied?1.0f:engine.bypassMix();
+    for(int c=0;c<channels;++c){
+     double result=wet[c];
+     if(std::isfinite(raw[c])){
+      if(bypassMix>=1.0f)result=raw[c];
+      else if(bypassMix>0&&std::isfinite(source[c]))result+=(raw[c]-static_cast<double>(source[c]))*bypassMix;
+     }
+     if(!std::isfinite(raw[c]))result=0.0;
+     if(data.symbolicSampleSize==kSample32)output.channelBuffers32[c][i]=static_cast<float>(result);
+     else output.channelBuffers64[c][i]=result;
+    }
    }
   }
   finishAutomationBlock(data.numSamples);grainActive.store(!denied&&engine.isActive());output.silenceFlags=0;return kResultOk;
@@ -626,7 +640,7 @@ private:
   std::array<double,parameterCount> p{};const int32 size=static_cast<int32>(sizeof(p));
   if(stream->read(p.data(),size,&bytes)!=kResultOk||bytes!=size)return kResultFalse;
   for(ParamID id=0;id<parameterCount;++id){p[id]=quantizeNormal(id,p[id]);values[id].store(p[id]);localEditing[id].store(false);}
-  processorParameters.restore(p);displayStateRevision.fetch_add(1);needsReset.store(true);invalidateView();return kResultOk;
+  processorParameters.restore(p);displayStateRevision.fetch_add(1);needsReset.store(true);return kResultOk;
  }
  tresult writeState(IBStream* stream){
   if(!stream)return kInvalidArgument;SavedStateHeader h{};int32 bytes=0;
@@ -637,46 +651,43 @@ private:
     bool prepareAutomationTimeline (IParameterChanges* changes, int32 blockSize)
     {
         std::array<bool, parameterCount> automated {};
-        if (changes != nullptr)
+        const int32 queueCount = changes == nullptr ? 0 : std::clamp (
+            changes->getParameterCount(), 0, static_cast<int32> (parameterCount));
+        std::size_t activeQueues = 0;
+        for (int32 index = 0; index < queueCount; ++index)
         {
-            for (int32 queueIndex = 0; queueIndex < changes->getParameterCount();
-                 ++queueIndex)
+            auto* queue = changes->getParameterData (index);
+            if (queue != nullptr && queue->getParameterId() < parameterCount
+                && queue->getPointCount() > 0)
             {
-                auto* queue = changes->getParameterData (queueIndex);
-                if (queue == nullptr || queue->getPointCount() <= 0)
-                    continue;
-                const auto id = queue->getParameterId();
-                if (id < parameterCount)
-                    automated[id] = true;
+                automated[queue->getParameterId()] = true;
+                ++activeQueues;
             }
         }
-
-        
-        // An empty queue means hold the last audio value, not copy the GUI.
         const auto startValues = processorParameters.consumePending (automated);
         automationTimeline.reset (startValues, blockSize);
-
-        if (changes != nullptr)
+        // Decide the budget before reading any host points. Ordinary lanes
+        // retain all points. Exceptionally dense lanes are evenly sampled,
+        // always retaining their first and final values; callback work and
+        // storage remain bounded even for a malformed oversized host queue.
+        const auto pointBudget = maximumAutomationPoints / std::max (std::size_t { 1 }, activeQueues);
+        for (int32 index = 0; index < queueCount; ++index)
         {
-            for (int32 queueIndex = 0; queueIndex < changes->getParameterCount();
-                 ++queueIndex)
+            auto* queue = changes->getParameterData (index);
+            if (queue == nullptr || queue->getParameterId() >= parameterCount
+                || queue->getPointCount() <= 0)
+                continue;
+            const auto id = queue->getParameterId();
+            const auto sourceCount = static_cast<std::size_t> (queue->getPointCount());
+            const auto retainedCount = std::min (sourceCount, pointBudget);
+            for (std::size_t point = 0; point < retainedCount; ++point)
             {
-                auto* queue = changes->getParameterData (queueIndex);
-                if (queue == nullptr)
-                    continue;
-                const auto id = queue->getParameterId();
-                const auto pointCount = queue->getPointCount();
-                if (id >= parameterCount || pointCount <= 0)
-                    continue;
-                for (int32 pointIndex = 0; pointIndex < pointCount; ++pointIndex)
-                {
-                    int32 offset = 0;
-                    ParamValue value = 0.0;
-                    if (queue->getPoint (pointIndex, offset, value) != kResultOk)
-                        continue;
-                    (void) automationTimeline.addPoint (
-                        id, offset, quantizeNormal (id, value));
-                }
+                const auto source = sourceCount <= retainedCount ? point
+                    : ParameterTimeline::sourcePointIndex (point, retainedCount, sourceCount);
+                int32 offset = 0;
+                ParamValue value = 0.0;
+                if (queue->getPoint (static_cast<int32> (source), offset, value) == kResultOk)
+                    (void) automationTimeline.addPoint (id, offset, quantizeNormal (id, value));
             }
         }
         return false;
@@ -700,6 +711,9 @@ private:
                 automationTimeline.valueAt (id, blockSize,
                                             isButtonParameter (id)));
         processorParameters.commit (finalValues);
+        if (! processingForView.load (std::memory_order_acquire))
+            for (ParamID id = 0; id < parameterCount; ++id)
+                values[id].store (finalValues[id], std::memory_order_relaxed);
     }
 
     static std::uint32_t seedFromValues (
@@ -1785,7 +1799,6 @@ void NativeView::paint (HDC windowDC)
     const auto lineColour = palette.lineColour;
     const auto rangeFill = palette.rangeFill;
     const auto disabledInk = palette.disabledInk;
-    const auto disabledFill = palette.disabledFill;
     (void) updateParameterDisplay();
     const auto& displayed = parameterDisplay.values();
     const auto normalized = [&] (ParamID id) { return displayed[id]; };
@@ -1942,7 +1955,18 @@ void NativeView::paint (HDC windowDC)
       }
       const int half=c.slider?22:39;
       trackedText(dc,smallFont,enabled?muted:disabledInk,label,{c.x-half,c.y-48,c.x+half,c.y-34},DT_CENTER, c.slider?0:1);
-      const auto compact=[&](ParamID id){auto v=displayValue(id,plain(id));if(c.slider&&v.size()>6){const auto pos=v.find(L' ');if(pos!=std::wstring::npos)v.resize(pos);}return v;};
+      const auto compact=[&](ParamID id){
+       auto value=displayValue(id,plain(id));
+       if(c.slider){
+        const auto previous=SelectObject(dc,valueFont);SIZE measured{};
+        GetTextExtentPoint32W(dc,value.c_str(),static_cast<int>(value.size()),&measured);
+        SelectObject(dc,previous);
+        if(measured.cx>scaled(half*2-12)){
+         const auto space=value.find(L' ');if(space!=std::wstring::npos)value.resize(space);
+        }
+       }
+       return value;
+      };
       text(dc,valueFont,primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
       const auto second=ranged?compact(c.maximum):c.minimum==amount&&mode==2?std::wstring(L"/ NOTE"):std::wstring{};
       text(dc,valueFont,primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
