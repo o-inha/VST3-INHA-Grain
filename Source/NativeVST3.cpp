@@ -2005,6 +2005,7 @@ void NativeView::paint (HDC windowDC)
 
     const auto smallFont = makeFont (10);
     const auto valueFont = makeFont (11);
+    const auto syncedSliderValueFont = makeFont (9);
     const auto linkFont = makeFont (11, true);
     const auto footerFont = makeFont (9);
     const auto sectionFont = makeFont (10);
@@ -2152,19 +2153,24 @@ void NativeView::paint (HDC windowDC)
        auto value=synced&&specs[id].time?std::wstring(InhaGrain::Timing::syncLabel(effective))
          :displayValue(id,grainRange?std::min(plain(id),plain(scatter)):plain(id));
        if(id==dryLevel||id==wetLevel){const auto space=value.find(L' ');if(space!=std::wstring::npos)value.resize(space);}
-       if(c.slider){
-        const auto previous=SelectObject(dc,valueFont);SIZE measured{};
-        GetTextExtentPoint32W(dc,value.c_str(),static_cast<int>(value.size()),&measured);
-        SelectObject(dc,previous);
-        if(measured.cx>scaled(half*2-2)&&!synced){
-         const auto space=value.find(L' ');if(space!=std::wstring::npos)value.resize(space);
+       if(c.slider&&specs[id].time&&!synced){
+        wchar_t duration[32]{};
+        const auto milliseconds=plain(id);
+        if(milliseconds<=999.0)std::swprintf(duration,32,L"%.0f",milliseconds);
+        else {
+         std::swprintf(duration,32,L"%.1f",milliseconds/1000.0);
+         value=duration;
+         if(value.size()>=2&&value.compare(value.size()-2,2,L".0")==0)value.resize(value.size()-2);
+         return value+L" S";
         }
+        value=duration;
        }
        return value;
       };
-      text(dc,valueFont,grainRange&&normalized(lo)>normalized(scatter)+1e-8?pink:primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
+      const auto controlValueFont=c.slider&&specs[lo].time&&synced?syncedSliderValueFont:valueFont;
+      text(dc,controlValueFont,grainRange&&normalized(lo)>normalized(scatter)+1e-8?pink:primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
       const auto second=ranged?compact(hi):c.minimum==amount&&mode==2?std::wstring(L"/ NOTE"):(c.minimum==dryLevel||c.minimum==wetLevel)?std::wstring(L"dB"):std::wstring{};
-      text(dc,valueFont,grainRange&&normalized(hi)>normalized(scatter)+1e-8?pink:primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
+      text(dc,controlValueFont,grainRange&&normalized(hi)>normalized(scatter)+1e-8?pink:primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
     }
     trackedText (dc, footerFont, muted,
                  L"v" + std::wstring (InhaGrainVersion::wide) + L" \xa9 2026 O. Inha / inha.jp",
@@ -2263,6 +2269,7 @@ void NativeView::paint (HDC windowDC)
 
     DeleteObject (smallFont);
     DeleteObject (valueFont);
+    DeleteObject (syncedSliderValueFont);
     DeleteObject (linkFont);
     DeleteObject (footerFont);
     DeleteObject (sectionFont);

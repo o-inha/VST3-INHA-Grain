@@ -477,7 +477,9 @@ void bufferCapAndNewControls(Editor& editor,const std::filesystem::path& directo
         for(int y=130;y<159;++y)for(int x=249;x<328;++x)
         {
             const auto colour=image.logicalPixel(x,y);
-            pink+=GetRValue(colour)>GetGValue(colour)+25&&GetBValue(colour)>GetGValue(colour)+10;
+            // ClearType gives dark text magenta fringes; warning pink is bright.
+            pink+=GetRValue(colour)>180&&GetRValue(colour)>GetGValue(colour)+25
+                &&GetBValue(colour)>GetGValue(colour)+10;
         }
         return pink;
     };
@@ -486,7 +488,9 @@ void bufferCapAndNewControls(Editor& editor,const std::filesystem::path& directo
     setPlain("Capture buffer",6000);editor.settleFooter();
     require(motionValue(editor,5)==requested[0]&&motionValue(editor,6)==requested[1],
             "Raising BUFFER lost the requested GRAIN handle positions");
-    require(pinkValues(capture(editor))==0,"GRAIN values remained pink after BUFFER allowed the requested sizes");
+    auto uncapped=capture(editor);
+    uncapped.save(directory/L"grain-buffer-allowed-100.png");
+    require(pinkValues(uncapped)==0,"GRAIN values remained pink after BUFFER allowed the requested sizes");
     const auto mass=editor.plain("Grain mass");
     editor.dragAt(61,91,50);
     require(editor.plain("Grain mass")>mass,"MASS knob did not change parallel stream count");
