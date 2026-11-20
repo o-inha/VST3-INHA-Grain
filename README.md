@@ -1,7 +1,7 @@
 # INHA Grain
 
-Windows x64 VST3 insert effect for captured granular textures. First development
-version: **0.1.0**. Built on INHA Core 0.1.2 and the native INHA editor family.
+Windows x64 VST3 insert effect for captured granular textures. Development
+version: **0.2.0**. Built on INHA Core 0.1.2 and the native INHA editor family.
 
 ## Getting started
 
@@ -26,8 +26,11 @@ Two values under a control are the lower/upper bounds of a seeded random range.
 | SCATTER | Duration of the source audio available for random grain starts, up to 20 seconds |
 | GRAIN | Grain-duration range, 5 ms–10 seconds |
 | ENV | Grain-window range: 0% triangle, 50% sine, 100% rounded square |
+| UNDULATION / SWAY tabs | Select event-shaped movement or continuous smooth random movement; each tab retains independent AMOUNT/SPEED settings |
 | UNDULATION AMOUNT | Signed grain-size movement within the full 5 ms–10 second knob domain: negative toward 5 ms, positive toward 10 seconds, zero steady |
 | UNDULATION SPEED | Duration as a percentage of the event's chosen attack + release; 50% means half their sum, 200% twice it |
+| SWAY AMOUNT | Depth range relative to the current event's base grain size, 0–100%; 20% permits approximately 80–120% of that size |
+| SWAY SPEED | Time range between smooth random targets, 25 ms–20 seconds; independent of event attack/release |
 | DUCK DRY | Attenuates the direct signal while granular events are active |
 | DUCK PRV | Shortens previous events' tails when a new event arrives |
 | A | Random linear event attack, up to 10 seconds; also trigger lockout/minimum volume-event duration |
@@ -39,6 +42,28 @@ Two values under a control are the lower/upper bounds of a seeded random range.
 Drag vertically. Shift adjusts finely. For range controls Ctrl translates both
 ends and Alt changes the width symmetrically. Double-click restores defaults.
 Times above 999 ms use seconds, e.g. `1.00 S`.
+
+## Grain-size motion
+
+**UNDULATION** keeps the original behavior: each event chooses a signed amount
+and duration, then gradually moves its grain size in that direction.
+
+**SWAY** is smooth random modulation. Its clock follows the DAW timeline and
+continues across notes, transients and gaps; new events do not restart it.
+Targets occur at seeded random intervals within the SPEED range and are joined
+smoothly. There is no fixed rising/falling direction. Movement can fall anywhere
+inside the chosen depth; the lower AMOUNT is a lower bound on target depth,
+not a requirement to stay away from the center.
+
+SWAY is centered on each event's current base GRAIN size. Moving or automating
+GRAIN therefore moves the center of the modulation too. At 20% depth, a 200 ms
+base can move roughly between 160 and 240 ms. Grain sizes remain within the
+5 ms–10 second limits. Both motion modes update newly launched grains while
+active grains finish smoothly, so very long grains respond more slowly.
+
+The tabs retain independent settings and the selection is automatable. Old
+0.1.0 states load in UNDULATION mode with their original parameter values.
+The new controls are appended to preserve existing automation IDs.
 
 ## Capture and texture
 
@@ -57,7 +82,7 @@ older event's source audio.
 
 Grains choose seeded random positions. Grain streams use 50% overlap and window
 normalization. Active grains keep their duration and envelope: automation and
-undulation change subsequent grains with smooth transitions. Even square-like
+grain-size motion change subsequent grains with smooth transitions. Even square-like
 windows retain short edge ramps, and sample loops use smoothed seams.
 
 Six event slots bound simultaneous work. Older events are retired more quickly

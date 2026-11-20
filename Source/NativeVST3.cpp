@@ -90,7 +90,8 @@ enum Parameter : ParamID {
  triggerMode, amount, sensitivity, threshold, scatter, grainMinimum, grainMaximum,
  envMinimum, envMaximum, undulationMinimum, undulationMaximum, speedMinimum, speedMaximum,
  attackMinimum, attackMaximum, releaseMinimum, releaseMaximum, duckDry, duckPrevious,
- dryLevel, wetLevel, seedHigh, seedLow, bypass, parameterCount
+ dryLevel, wetLevel, seedHigh, seedLow, bypass,
+ motionMode, swayAmountMinimum, swayAmountMaximum, swaySpeedMinimum, swaySpeedMaximum, parameterCount
 };
 struct ParamSpec { const char* title; const char* shortTitle; const char* unit;
  double minimum, maximum, defaultValue; bool time; };
@@ -118,7 +119,12 @@ constexpr std::array<ParamSpec,parameterCount> specs {{
  {"Wet level","Wet","dB",-60,6,0,false},
  {"Seed high word","Seed high","",0,65535,3887,false},
  {"Seed low word","Seed low","",0,65535,5271,false},
- {"Bypass","Bypass","",0,1,0,false}
+ {"Bypass","Bypass","",0,1,0,false},
+ {"Grain motion mode","Motion","",0,1,0,false},
+ {"Sway amount minimum","Sway min","%",0,100,10,false},
+ {"Sway amount maximum","Sway max","%",0,100,30,false},
+ {"Sway duration minimum","Sway speed min","ms",25,20000,500,true},
+ {"Sway duration maximum","Sway speed max","ms",25,20000,1500,true}
 }};
 bool iidEqual (const TUID a, const TUID b) noexcept
 {
@@ -160,10 +166,10 @@ double clampNormal (double value) noexcept
 }
 
 
-bool isButtonParameter(ParamID id) noexcept { return id==triggerMode || id==bypass || id==seedHigh || id==seedLow; }
+bool isButtonParameter(ParamID id) noexcept { return id==triggerMode || id==motionMode || id==bypass || id==seedHigh || id==seedLow; }
 double quantizeNormal(ParamID id,double x) noexcept {
  x=clampNormal(x); if(id==triggerMode) return std::round(x*3.0)/3.0;
- if(id==bypass) return x>=0.5?1.0:0.0;
+ if(id==bypass || id==motionMode) return x>=0.5?1.0:0.0;
  if(id==seedHigh || id==seedLow) return std::round(x*65535.0)/65535.0;
  return x;
 }
@@ -181,6 +187,7 @@ double defaultStateNormalized(ParamID id) noexcept { return toNormal(id,specs[id
 const char* choiceName(ParamID id,double plain) {
  if(id==triggerMode) { constexpr const char* names[]{"NONE","TRANSIENTS","MIDI NOTES","VOLUME"};
  return names[std::clamp(static_cast<int>(std::lround(plain)),0,3)]; }
+ if(id==motionMode) return plain>=0.5?"SWAY":"UNDULATION";
  return id==bypass?(plain>=0.5?"ON":"OFF"):nullptr;
 }
 std::wstring displayValue(ParamID id,double value) {
@@ -196,7 +203,9 @@ std::wstring displayValue(ParamID id,double value) {
  else std::swprintf(text,64,L"%.0f%%",value);
  return text;
 }
-struct SavedStateHeader { std::uint32_t magic=0x47524149u,version=1; };
+struct SavedStateHeader { std::uint32_t magic=0x47524149u,version=2; };
+constexpr std::size_t stateV1ParameterCount = 24;
+static_assert (bypass == 23 && motionMode == stateV1ParameterCount && parameterCount == 29);
 constexpr std::size_t maximumAutomationPoints=2048;
 using ParameterTimeline=InhaAutomation::Timeline<parameterCount,maximumAutomationPoints>;
 constexpr int sidePanelLogicalWidth=13, contentEditorWidth=498, contentLeft=13,
@@ -215,6 +224,10 @@ constexpr RECT triggerMenuItemRect(int i){return {triggerMenuRect.left,triggerMe
 constexpr RECT seedRefreshRect{triggerSelectorRect.left-29,0,triggerSelectorRect.left-5,headerHeight};
 constexpr RECT seedValueRect{seedRefreshRect.left-78,0,seedRefreshRect.left-1,headerHeight};
 constexpr RECT logoHitRect{contentLeft,0,contentLeft+125,headerHeight};
+constexpr std::array<RECT,2> motionTabRects{{
+ {contentLeft+8,174,contentLeft+120,196},
+ {contentLeft+120,174,contentLeft+190,196}
+}};
 constexpr ParamID symmetricRangeDrag=parameterCount+1,translateRangeDrag=parameterCount+2,pendingRangeDrag=parameterCount+3;
 struct Control {ParamID minimum,maximum;int x,y;const wchar_t* label;bool slider;};
 constexpr std::array<Control,12> controls{{
@@ -294,6 +307,7 @@ private:
     [[nodiscard]] bool pointIn (RECT rect, int x, int y) const;
     [[nodiscard]] double knobValue (RECT knob, int x, int y) const;
     [[nodiscard]] ParamID firstControlParameter() const;
+    [[nodiscard]] ParamID visibleControlParameter (ParamID) const;
     [[nodiscard]] HCURSOR cursorFor (int x, int y) const;
 
     std::atomic<uint32> references { 1 };
@@ -331,6 +345,7 @@ private:
     Gdiplus::Image* woodLeft = nullptr;
     Gdiplus::Image* woodRight = nullptr;
     bool lastActivity = false;
+    int lastMotionMode = -1;
     LicenseStatus lastLicenseStatus = LicenseStatus::checking;
     RECT licenseHelpRect {};
     bool zoomed = false;
@@ -474,9 +489,9 @@ public:
  tresult PLUGIN_API getParameterInfo(int32 index,ParameterInfo& info) override{
   if(index<0||index>=parameterCount)return kInvalidArgument;const auto& p=specs[index];std::memset(&info,0,sizeof(info));
   info.id=index;copyUtf16(info.title,p.title);copyUtf16(info.shortTitle,p.shortTitle);copyUtf16(info.units,p.unit);
-  info.stepCount=index==triggerMode?3:index==bypass?1:index==seedHigh||index==seedLow?65535:0;
+  info.stepCount=index==triggerMode?3:index==bypass||index==motionMode?1:index==seedHigh||index==seedLow?65535:0;
   info.defaultNormalizedValue=defaultStateNormalized(index);info.unitId=0;
-  info.flags=ParameterInfo::kCanAutomate|(index==triggerMode?ParameterInfo::kIsList:0)|(index==bypass?ParameterInfo::kIsBypass:0);return kResultOk;
+  info.flags=ParameterInfo::kCanAutomate|((index==triggerMode||index==motionMode)?ParameterInfo::kIsList:0)|(index==bypass?ParameterInfo::kIsBypass:0);return kResultOk;
  }
  tresult PLUGIN_API getParamStringByValue(ParamID id,ParamValue normalized,String128 text) override{
   if(id>=parameterCount)return kInvalidArgument;const double p=toPlain(id,normalized);
@@ -488,7 +503,7 @@ public:
  tresult PLUGIN_API getParamValueByString(ParamID id,TChar* text,ParamValue& normalized) override{
   if(id>=parameterCount||!text)return kInvalidArgument;
   char b[128]{};for(int i=0;i<127&&text[i];++i)b[i]=static_cast<char>(text[i]);
-  if(id==triggerMode)for(int m=0;m<4;++m)if(_stricmp(b,choiceName(id,m))==0){normalized=toNormal(id,m);return kResultOk;}
+  if(id==triggerMode||id==motionMode)for(int m=0;m<(id==triggerMode?4:2);++m)if(_stricmp(b,choiceName(id,m))==0){normalized=toNormal(id,m);return kResultOk;}
   if(id==bypass&&(_stricmp(b,"ON")==0||_stricmp(b,"OFF")==0)){normalized=_stricmp(b,"ON")==0?1:0;return kResultOk;}
   if((id==dryLevel||id==wetLevel)&&_strnicmp(b,"-INF",4)==0){normalized=0;return kResultOk;}
   char* end=nullptr;auto value=std::strtod(b,&end);if(end==b||!std::isfinite(value))return kResultFalse;
@@ -607,6 +622,38 @@ public:
             zero, std::memory_order_relaxed);
         editFromView (id, zero, 2);
     }
+    void resetControlFromView (ParamID minimum, ParamID maximum)
+    {
+        if (minimum >= parameterCount)
+            return;
+        if (minimum == dryLevel || minimum == wetLevel)
+        {
+            resetLevelFromView (minimum);
+            return;
+        }
+        if (maximum >= parameterCount)
+        {
+            editFromView (minimum, defaultStateNormalized (minimum), 2);
+        }
+        else
+        {
+            const bool grouped = componentHandler2 != nullptr
+                && componentHandler2->startGroupEdit() == kResultOk;
+            editFromView (minimum, defaultStateNormalized (minimum), -1);
+            editFromView (maximum, defaultStateNormalized (maximum), -1);
+            if (componentHandler != nullptr)
+            {
+                componentHandler->endEdit (minimum);
+                componentHandler->endEdit (maximum);
+            }
+            localEditing[minimum].store (false, std::memory_order_release);
+            localEditing[maximum].store (false, std::memory_order_release);
+            if (grouped)
+                componentHandler2->finishGroupEdit();
+        }
+        displayStateRevision.fetch_add (1, std::memory_order_release);
+        invalidateView();
+    }
     [[nodiscard]] bool isGrainingForView() const noexcept
     {
         return grainActive.load (std::memory_order_acquire);
@@ -641,8 +688,11 @@ public:
 private:
  tresult readState(IBStream* stream){
   if(!stream)return kInvalidArgument;SavedStateHeader h{};int32 bytes=0;
-  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||h.magic!=0x47524149u||h.version!=1)return kResultFalse;
-  std::array<double,parameterCount> p{};const int32 size=static_cast<int32>(sizeof(p));
+  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||h.magic!=0x47524149u||(h.version!=1&&h.version!=2))return kResultFalse;
+  std::array<double,parameterCount> p{};
+  for(ParamID id=0;id<parameterCount;++id)p[id]=defaultStateNormalized(id);
+  const auto count=h.version==1?stateV1ParameterCount:static_cast<std::size_t>(parameterCount);
+  const int32 size=static_cast<int32>(count*sizeof(double));
   if(stream->read(p.data(),size,&bytes)!=kResultOk||bytes!=size)return kResultFalse;
   for(ParamID id=0;id<parameterCount;++id){p[id]=quantizeNormal(id,p[id]);values[id].store(p[id]);localEditing[id].store(false);}
   processorParameters.restore(p);displayStateRevision.fetch_add(1);needsReset.store(true);return kResultOk;
@@ -734,6 +784,9 @@ private:
  InhaGrain::Parameters makeSettings(const std::array<double,parameterCount>& p) const noexcept {
   const auto v=[&](ParamID id){return toPlain(id,p[id]);};InhaGrain::Parameters result;
   result.mode=static_cast<int>(std::lround(v(triggerMode)));
+  result.motionMode=static_cast<int>(std::lround(v(motionMode)));
+  result.swayAmountMinPercent=v(swayAmountMinimum);result.swayAmountMaxPercent=v(swayAmountMaximum);
+  result.swaySpeedMinMs=v(swaySpeedMinimum);result.swaySpeedMaxMs=v(swaySpeedMaximum);
   result.amount=v(amount);result.sensitivity=v(sensitivity);result.thresholdDb=v(threshold);result.scatterMs=v(scatter);
   result.grainMinMs=v(grainMinimum);result.grainMaxMs=v(grainMaximum);result.envMinPercent=v(envMinimum);result.envMaxPercent=v(envMaximum);
   result.undulationMinPercent=v(undulationMinimum);result.undulationMaxPercent=v(undulationMaximum);
@@ -1073,6 +1126,11 @@ LRESULT NativeView::handleMessage (HWND hwnd, UINT message, WPARAM wParam, LPARA
                 updateFooterAnimation();
                 updateTriggerMenuAnimation();
                 pollPreferences();
+                if(lastMotionMode!=static_cast<int>(std::lround(owner.plain(motionMode))))
+                {
+                    mouseUp();
+                    updateFooterTooltips();
+                }
                 const auto active = owner.isGrainingForView();
                 const auto license = owner.licenseStatusForView();
                 const auto parametersChanged = updateParameterDisplay();
@@ -1199,6 +1257,7 @@ void NativeView::updateFooterTooltips()
             WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
             CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, moduleInstance, nullptr);
         if (footerTooltips == nullptr) return;
+        SendMessageW (footerTooltips, TTM_SETMAXTIPWIDTH, 0, zoomed ? 480 : 320);
     }
     constexpr std::array<const wchar_t*, 3> labels {{
         L"Settings", L"Toggle light / dark theme",
@@ -1219,6 +1278,37 @@ void NativeView::updateFooterTooltips()
         tool.lpszText = const_cast<wchar_t*> (labels[index + 1]);
         SendMessageW (footerTooltips, create ? TTM_ADDTOOLW : TTM_NEWTOOLRECTW, 0,
                       reinterpret_cast<LPARAM> (&tool));
+    }
+    lastMotionMode = static_cast<int> (std::lround (owner.plain (motionMode)));
+    const bool sway = lastMotionMode == 1;
+    const std::array<const wchar_t*, 4> motionLabels {{
+        L"UNDULATION: one-way grain-size movement during each event. Negative AMOUNT shrinks grains; positive AMOUNT grows them. SPEED is a percentage of the event's attack + release duration.",
+        L"SWAY: continuous movement toward seeded random grain-size targets on the DAW timeline. AMOUNT is relative to the base grain size. SPEED is time between targets, independent of attack and release.",
+        sway ? L"SWAY AMOUNT: depth relative to the base grain size. 20% allows targets from 80% to 120% of that size. The two handles set the randomized depth range."
+             : L"UNDULATION AMOUNT: signed grain-size movement for each event. Negative shrinks; positive grows. The two handles set the randomized amount range.",
+        sway ? L"SWAY SPEED: time between new random targets, in milliseconds / seconds. Independent of event attack and release. The two handles set the duration range."
+             : L"UNDULATION SPEED: duration as a percentage of the event's attack + release. 100% uses their combined duration; 200% takes twice as long."
+    }};
+    const std::array<RECT, 4> motionRects {{
+        motionTabRects[0], motionTabRects[1],
+        {contentLeft+14,201,contentLeft+92,319},
+        {contentLeft+104,201,contentLeft+182,319}
+    }};
+    for (std::size_t index = 0; index < motionRects.size(); ++index)
+    {
+        const auto rect = motionRects[index];
+        TOOLINFOW tool {};
+        tool.cbSize = sizeof (tool);
+        tool.uFlags = TTF_SUBCLASS;
+        tool.hwnd = window;
+        tool.uId = static_cast<UINT_PTR> (100 + index);
+        tool.rect = {scaled(rect.left), scaled(rect.top), scaled(rect.right), scaled(rect.bottom)};
+        tool.lpszText = const_cast<wchar_t*> (motionLabels[index]);
+        SendMessageW (footerTooltips, create ? TTM_ADDTOOLW : TTM_NEWTOOLRECTW, 0,
+                      reinterpret_cast<LPARAM> (&tool));
+        if (!create)
+            SendMessageW (footerTooltips, TTM_UPDATETIPTEXTW, 0,
+                          reinterpret_cast<LPARAM> (&tool));
     }
 }
 
@@ -1757,7 +1847,20 @@ ParamID NativeView::firstControlParameter() const {
  const auto mode=static_cast<int>(std::lround(owner.plain(triggerMode)));
  return mode==1?sensitivity:mode==3?threshold:amount;
 }
+ParamID NativeView::visibleControlParameter (ParamID id) const {
+ if(id==amount)return firstControlParameter();
+ if(owner.plain(motionMode)<0.5)return id;
+ if(id==undulationMinimum)return swayAmountMinimum;
+ if(id==undulationMaximum)return swayAmountMaximum;
+ if(id==speedMinimum)return swaySpeedMinimum;
+ if(id==speedMaximum)return swaySpeedMaximum;
+ return id;
+}
 RECT NativeView::knobFor(ParamID id) const {
+ if(id==swayAmountMinimum)id=undulationMinimum;
+ else if(id==swayAmountMaximum)id=undulationMaximum;
+ else if(id==swaySpeedMinimum)id=speedMinimum;
+ else if(id==swaySpeedMaximum)id=speedMaximum;
  for(const auto& c:controls)if(c.minimum==id||c.maximum==id||(c.minimum==amount&&(id==sensitivity||id==threshold)))return {c.x-38,c.y-38,c.x+38,c.y+38};
  return {};
 }
@@ -1782,6 +1885,7 @@ double NativeView::knobValue(RECT r,int x,int y) const {
 HCURSOR NativeView::cursorFor(int x,int y) const {
  const auto hand=LoadCursorW(nullptr,MAKEINTRESOURCEW(32649)),arrow=LoadCursorW(nullptr,MAKEINTRESOURCEW(32512));
  if(pointIn(licenseHelpRect,x,y)||pointIn(footerSettingsRect,x,y)||pointIn(logoHitRect,x,y)||pointIn(seedValueRect,x,y)||pointIn(seedRefreshRect,x,y)||pointIn(triggerSelectorRect,x,y))return hand;
+ for(const auto& tab:motionTabRects)if(pointIn(tab,x,y))return hand;
  for(int i=0;footerExpanded&&i<2;++i)if(pointIn(footerButtonRect(i),x,y))return hand;
  if(triggerMenuOpen&&triggerMenuItemAt(x,y)>=0)return hand;
  for(const auto& c:controls)if(pointIn(knobFor(c.minimum),x,y)||pointIn(verticalValueFor(c.minimum),x,y))return hand;
@@ -1924,20 +2028,26 @@ void NativeView::paint (HDC windowDC)
     text(dc,sectionFont,ink,modeName,{groupLeft+19,0,groupLeft+groupWidth+1,headerHeight},DT_CENTER|DT_VCENTER,2);
     const auto undulationPanel=darkTheme?RGB(40,40,39):RGB(232,225,206);
     const auto duckPanel=darkTheme?RGB(35,35,34):RGB(226,219,200);
-    fill(dc,{contentLeft+8,174,contentLeft+190,330},undulationPanel);
+    const auto selectedMotion=plain(motionMode)>=0.5?1:0;
+    fill(dc,{contentLeft+8,196,contentLeft+190,330},undulationPanel);
+    constexpr std::array<const wchar_t*,2> motionNames{{L"UNDULATION",L"SWAY"}};
+    for(int index=0;index<2;++index){
+     fill(dc,motionTabRects[index],index==selectedMotion?undulationPanel:panel);
+     text(dc,sectionFont,index==selectedMotion?ink:muted,motionNames[index],motionTabRects[index],DT_CENTER|DT_VCENTER);
+    }
     fill(dc,{contentLeft+198,174,contentLeft+291,330},duckPanel);
-    text(dc,sectionFont,muted,L"UNDULATION",{contentLeft+17,177,contentLeft+185,195},DT_LEFT|DT_VCENTER);
     text(dc,sectionFont,muted,L"DUCK",{contentLeft+207,177,contentLeft+284,195},DT_LEFT|DT_VCENTER);
     line(dc,contentLeft+398,43,contentLeft+398,322,lineColour);
     constexpr int radius=30;
     for(const auto& c:controls){
-      const auto lo=c.minimum==amount?firstControlParameter():c.minimum;
+      const auto lo=visibleControlParameter(c.minimum);
+      const auto hi=visibleControlParameter(c.maximum);
       const bool enabled=c.minimum!=amount||mode!=0;
       const auto label=c.minimum==amount?(mode==1?L"SENS.":mode==3?L"THLD":L"AMOUNT"):c.label;
       const auto primary=enabled?ink:disabledInk,secondary=enabled?lineColour:disabledInk;
-      const bool ranged=c.maximum<parameterCount;
-      const auto a=std::min(normalized(lo),ranged?normalized(c.maximum):normalized(lo));
-      const auto b=std::max(normalized(lo),ranged?normalized(c.maximum):normalized(lo));
+      const bool ranged=hi<parameterCount;
+      const auto a=std::min(normalized(lo),ranged?normalized(hi):normalized(lo));
+      const auto b=std::max(normalized(lo),ranged?normalized(hi):normalized(lo));
       const auto bg=c.minimum==undulationMinimum||c.minimum==speedMinimum?undulationPanel:
         c.minimum==duckDry||c.minimum==duckPrevious?duckPanel:panel;
       if(!c.slider){
@@ -1973,7 +2083,7 @@ void NativeView::paint (HDC windowDC)
        return value;
       };
       text(dc,valueFont,primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
-      const auto second=ranged?compact(c.maximum):c.minimum==amount&&mode==2?std::wstring(L"/ NOTE"):std::wstring{};
+      const auto second=ranged?compact(hi):c.minimum==amount&&mode==2?std::wstring(L"/ NOTE"):std::wstring{};
       text(dc,valueFont,primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
     }
     trackedText (dc, footerFont, muted,
@@ -2095,33 +2205,50 @@ void NativeView::mouseDown(int x,int y,bool rightButton){
  if(pointIn(logoHitRect,x,y)){toggleZoom();return;}
  if(pointIn(seedValueRect,x,y)){beginSeedEdit();return;}
  if(pointIn(seedRefreshRect,x,y)){LARGE_INTEGER ticks{};QueryPerformanceCounter(&ticks);auto seed=static_cast<std::uint32_t>(ticks.QuadPart^GetTickCount64());seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;owner.setSeedFromView(seed);return;}
+ for(int index=0;index<2;++index)if(pointIn(motionTabRects[index],x,y)){
+  mouseUp();owner.editFromView(motionMode,toNormal(motionMode,index),2);updateFooterTooltips();return;
+ }
  for(auto id:{dryLevel,wetLevel})if(pointIn(verticalLabelFor(id),x,y)){owner.toggleLevelFromView(id);return;}
  for(const auto& c:controls){
   if(c.minimum==amount&&owner.plain(triggerMode)<0.5)continue;
-  const auto lo=c.minimum==amount?firstControlParameter():c.minimum;
+  const auto lo=visibleControlParameter(c.minimum);
+  const auto hi=visibleControlParameter(c.maximum);
   const bool hitValue=pointIn(verticalValueFor(lo),x,y);
   const auto bounds=c.slider?verticalSliderFor(lo):knobFor(lo);
   if(!hitValue&&!pointIn(bounds,x,y))continue;
-  dragStartX=x;dragStartY=y;rangeDragMinimumId=lo;rangeDragMaximumId=c.maximum;
-  rangeDragMinimumStart=owner.normalized(lo);rangeDragMaximumStart=c.maximum<parameterCount?owner.normalized(c.maximum):rangeDragMinimumStart;
-  if(c.maximum<parameterCount){
+  dragStartX=x;dragStartY=y;rangeDragMinimumId=lo;rangeDragMaximumId=hi;
+  rangeDragMinimumStart=owner.normalized(lo);rangeDragMaximumStart=hi<parameterCount?owner.normalized(hi):rangeDragMinimumStart;
+  if(hi<parameterCount){
    const auto kind=Inha::Ui::rangeDragMode(currentModifiers());
    if(kind!=Inha::Ui::RangeDragMode::handle){
     dragParameter=kind==Inha::Ui::RangeDragMode::translate?translateRangeDrag:symmetricRangeDrag;
-    rangeDragMinimumStart=std::min(owner.normalized(lo),owner.normalized(c.maximum));rangeDragMaximumStart=std::max(owner.normalized(lo),owner.normalized(c.maximum));
-    owner.editFromView(lo,rangeDragMinimumStart,-1);owner.editFromView(c.maximum,rangeDragMaximumStart,-1);return;
+    rangeDragMinimumStart=std::min(owner.normalized(lo),owner.normalized(hi));rangeDragMaximumStart=std::max(owner.normalized(lo),owner.normalized(hi));
+    owner.editFromView(lo,rangeDragMinimumStart,-1);owner.editFromView(hi,rangeDragMaximumStart,-1);return;
    }
-   if(hitValue)dragParameter=y>=c.y+51?c.maximum:lo;
+   if(hitValue)dragParameter=y>=c.y+51?hi:lo;
    else if(std::abs(rangeDragMaximumStart-rangeDragMinimumStart)<1e-9){dragParameter=pendingRangeDrag;return;}
    else {const double click=c.slider?clampNormal(static_cast<double>(c.y+30-y)/60):knobValue(bounds,x,y);
-    dragParameter=std::abs(click-rangeDragMaximumStart)<std::abs(click-rangeDragMinimumStart)?c.maximum:lo;}
+    dragParameter=std::abs(click-rangeDragMaximumStart)<std::abs(click-rangeDragMinimumStart)?hi:lo;}
   }else dragParameter=lo;
   dragStartValue=owner.normalized(dragParameter);
   owner.editFromView(dragParameter,dragStartValue,-1);return;
  }
 }
 void NativeView::mouseDoubleClick(int x,int y){
- for(auto id:{dryLevel,wetLevel})if(pointIn(verticalValueFor(id),x,y)){owner.resetLevelFromView(id);return;}
+ const auto status=owner.licenseStatusForView();
+ if(status==LicenseStatus::invalidLocalKey||status==LicenseStatus::denied||triggerMenuOpen||triggerMenuReveal>0){mouseDown(x,y,false);return;}
+ for(auto id:{dryLevel,wetLevel}){
+  if(pointIn(verticalValueFor(id),x,y)){mouseUp();owner.resetLevelFromView(id);return;}
+  if(pointIn(verticalLabelFor(id),x,y))return;
+ }
+ for(const auto& control:controls){
+  if(control.minimum==amount&&owner.plain(triggerMode)<0.5)continue;
+  const auto lo=visibleControlParameter(control.minimum),hi=visibleControlParameter(control.maximum);
+  const auto area=control.slider?verticalSliderFor(lo):knobFor(lo);
+  if(pointIn(area,x,y)||pointIn(verticalValueFor(lo),x,y)){
+   mouseUp();owner.resetControlFromView(lo,hi);return;
+  }
+ }
  mouseDown(x,y,false);
 }
 void NativeView::mouseDrag(int,int y){

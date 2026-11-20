@@ -57,6 +57,64 @@ std::uint64_t GrainEngine::samplesForMs (double ms) const noexcept
         std::llround (ms * sampleRate_ * 0.001)));
 }
 
+double GrainEngine::swayKnotTime (std::int64_t index) const noexcept
+{
+    const auto minimum = static_cast<double> (std::min (
+        parameters_.swaySpeedMinMs, parameters_.swaySpeedMaxMs));
+    const auto maximum = static_cast<double> (std::max (
+        parameters_.swaySpeedMinMs, parameters_.swaySpeedMaxMs));
+    const auto period = (minimum + maximum) * 0.5;
+    const auto jitter = (maximum - minimum) * 0.25;
+    // Jitter each knot around a regular lattice. Adjacent distances are
+    // P +/- 2J, exactly the selected transition-duration range. The large
+    // SWAY-specific domains cannot alter the existing event/grain choices.
+    const auto offset = static_cast<double> (random (
+        static_cast<std::uint64_t> (index), 0x5357415954494d45ULL)) * 2.0 - 1.0;
+    return static_cast<double> (index) * period + offset * jitter;
+}
+
+float GrainEngine::swayValue (std::int64_t absoluteSample) const noexcept
+{
+    const auto minimum = static_cast<double> (std::min (
+        parameters_.swaySpeedMinMs, parameters_.swaySpeedMaxMs));
+    const auto maximum = static_cast<double> (std::max (
+        parameters_.swaySpeedMinMs, parameters_.swaySpeedMaxMs));
+    const auto period = (minimum + maximum) * 0.5;
+    const auto time = static_cast<double> (absoluteSample) * 1000.0 / sampleRate_;
+    auto index = static_cast<std::int64_t> (std::floor (time / period));
+    auto left = swayKnotTime (index);
+    auto right = swayKnotTime (index + 1);
+    // J < P/2, so a direct lookup needs at most one neighboring interval.
+    // Signed indices extend the same trajectory through negative pre-roll.
+    if (time < left)
+    {
+        right = left;
+        left = swayKnotTime (--index);
+    }
+    else if (time >= right)
+    {
+        left = right;
+        right = swayKnotTime (++index + 1);
+    }
+    const auto target = [this] (std::int64_t knot) noexcept
+    {
+        const auto key = static_cast<std::uint64_t> (knot);
+        const auto depth = pick (parameters_.swayAmountMinPercent,
+                                 parameters_.swayAmountMaxPercent, key,
+                                 0x5357415944455054ULL) * 0.01f;
+        const auto direction = random (key, 0x5357415956414c55ULL) * 2.0f - 1.0f;
+        return depth * direction;
+    };
+    // Protect the lookup even at pathological near-int64-limit timestamps,
+    // where double precision may merge otherwise distinct millisecond knots.
+    const auto position = right > left
+        ? std::clamp ((time - left) / (right - left), 0.0, 1.0) : 0.5;
+    const auto blend = position * position * (3.0 - 2.0 * position);
+    const auto from = target (index);
+    const auto to = target (index + 1);
+    return static_cast<float> (from + (to - from) * blend);
+}
+
 void GrainEngine::prepare (double sampleRate)
 {
     sampleRate_ = std::clamp (std::isfinite (sampleRate) ? sampleRate : 48000.0,
@@ -140,6 +198,11 @@ void GrainEngine::setParameters (const Parameters& values) noexcept
     p.duckPreviousPercent = finiteClamp (p.duckPreviousPercent, 0, 100, 90);
     p.dryDb = finiteClamp (p.dryDb, -60, 6, 0);
     p.wetDb = finiteClamp (p.wetDb, -60, 6, 0);
+    p.motionMode = std::clamp (p.motionMode, 0, 1);
+    p.swayAmountMinPercent = finiteClamp (p.swayAmountMinPercent, 0, 100, 10);
+    p.swayAmountMaxPercent = finiteClamp (p.swayAmountMaxPercent, 0, 100, 30);
+    p.swaySpeedMinMs = finiteClamp (p.swaySpeedMinMs, 25, 20000, 500);
+    p.swaySpeedMaxMs = finiteClamp (p.swaySpeedMaxMs, 25, 20000, 1500);
     if (p.dryDb != parameters_.dryDb)
         dryTarget_ = dbGain (p.dryDb);
     if (p.wetDb != parameters_.wetDb)
@@ -268,10 +331,15 @@ void GrainEngine::launchGrain (Event& event) noexcept
     const auto minimum = std::min (parameters_.grainMinMs, parameters_.grainMaxMs);
     const auto maximum = std::max (parameters_.grainMinMs, parameters_.grainMaxMs);
     double size = minimum + (maximum - minimum) * event.grainQuantile;
-    const auto progress = std::clamp (static_cast<double> (event.age) /
-        (static_cast<double> (event.attack + event.release) * event.speed), 0.0, 1.0);
-    const auto destination = event.undulation < 0.0f ? 5.0 : 10000.0;
-    size += (destination - size) * std::abs (event.undulation) * progress;
+    if (parameters_.motionMode == 1)
+        size = std::clamp (size * (1.0 + swayValue (timeline_)), 5.0, 10000.0);
+    else
+    {
+        const auto progress = std::clamp (static_cast<double> (event.age) /
+            (static_cast<double> (event.attack + event.release) * event.speed), 0.0, 1.0);
+        const auto destination = event.undulation < 0.0f ? 5.0 : 10000.0;
+        size += (destination - size) * std::abs (event.undulation) * progress;
+    }
     auto duration = static_cast<std::uint32_t> (samplesForMs (size));
     if (event.previousGrain != 0)
         duration = std::clamp (duration, std::max<std::uint32_t> (2, event.previousGrain / 2),

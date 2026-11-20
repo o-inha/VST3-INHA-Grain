@@ -47,6 +47,15 @@ struct GrainEngineTestAccess {
         }
         return {};
     }
+    static float swayAt(const GrainEngine& engine, std::int64_t sample) {
+        return engine.swayValue(sample);
+    }
+    static double swayKnotAt(const GrainEngine& engine, std::int64_t index) {
+        return engine.swayKnotTime(index);
+    }
+    static float currentSway(const GrainEngine& engine) {
+        return engine.swayValue(engine.timeline_);
+    }
 };
 }
 
@@ -558,6 +567,222 @@ void testEventGrainQuantileAndUndulation() {
     CHECK(directionCorrect, "signed UNDULATION changes grain size monotonically in the selected direction");
 }
 
+void testSwayTimelineAndRange() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    GrainEngine a, b;
+    constexpr double lowRate = 8000.0;
+    a.prepare(lowRate); b.prepare(lowRate);
+    auto p = base();
+    p.mode = 2;
+    p.motionMode = 1;
+    p.swayAmountMinPercent = 10.0f; p.swayAmountMaxPercent = 30.0f;
+    p.swaySpeedMinMs = 500.0f; p.swaySpeedMaxMs = 1500.0f;
+    a.setParameters(p); b.setParameters(p);
+    a.reset(0); b.reset(987654);
+    bool identical = true, bounded = true;
+    float minimum = 1.0f, maximum = -1.0f;
+    for (int i = -500; i < 2500; ++i) {
+        const std::int64_t sample = static_cast<std::int64_t>(i) * 997;
+        const float x = Access::swayAt(a, sample);
+        const float y = Access::swayAt(b, sample);
+        identical = identical && x == y;
+        bounded = bounded && std::isfinite(x) && std::abs(x) <= 0.300001f;
+        minimum = std::min(minimum, x); maximum = std::max(maximum, x);
+    }
+    CHECK(identical, "SWAY seed/timeline lookup is identical regardless of current playback position");
+    CHECK(bounded && minimum < -0.03f && maximum > 0.03f,
+          "SWAY moves in both directions within its selected maximum depth");
+
+    double seedDifference = 0.0;
+    ++p.seed;
+    b.setParameters(p);
+    for (int i = 0; i < 1000; ++i) {
+        const std::int64_t sample = static_cast<std::int64_t>(i) * 991;
+        seedDifference += std::abs(Access::swayAt(a, sample) - Access::swayAt(b, sample));
+    }
+    CHECK(seedDifference > 1.0, "refreshing the seed changes the continuous SWAY path");
+    --p.seed;
+    b.setParameters(p);
+    const std::array<std::int64_t, 7> seeks {{
+        0, -1, 57, 987654, -1234567, (std::int64_t{1} << 42) + 12345,
+        -(std::int64_t{1} << 40) + 987
+    }};
+    bool seekMatches = true;
+    for (const auto sample : seeks) {
+        const float expected = Access::swayAt(a, sample);
+        b.reset(sample);
+        seekMatches = seekMatches && Access::currentSway(b) == expected;
+    }
+    CHECK(seekMatches, "arbitrary positive/negative timeline resets recover the same SWAY phase directly");
+
+    // The random clock must not follow event age, attack, release, or trigger count.
+    p.attackMinMs = p.attackMaxMs = 1.0f;
+    p.releaseMinMs = p.releaseMaxMs = 5.0f;
+    a.setParameters(p); a.reset();
+    p.attackMinMs = p.attackMaxMs = 10000.0f;
+    p.releaseMinMs = p.releaseMaxMs = 30000.0f;
+    b.setParameters(p); b.reset();
+    bool independent = true;
+    for (int n = 0; n < 24000; ++n) {
+        if (n % 97 == 0) a.noteOn();
+        if (n % 2909 == 0) b.noteOn();
+        independent = independent && Access::currentSway(a) == Access::currentSway(b);
+        a.process(0.2f, 0.2f); b.process(0.2f, 0.2f);
+    }
+    CHECK(independent, "SWAY global time survives event retriggers and is independent of attack/release");
+}
+
+void testSwayAudioDeterminism() {
+    GrainEngine a, b;
+    a.prepare(rate); b.prepare(rate);
+    auto p = base();
+    p.motionMode = 1;
+    p.swayAmountMinPercent = 10.0f; p.swayAmountMaxPercent = 70.0f;
+    p.swaySpeedMinMs = 25.0f; p.swaySpeedMaxMs = 500.0f;
+    const auto reference = deterministicRender(a, p, 64, 9876543);
+    const auto differentBlocks = deterministicRender(b, p, 511, 9876543);
+    const auto replay = deterministicRender(a, p, 127, 9876543);
+    CHECK(std::memcmp(reference.data(), differentBlocks.data(), reference.size() * sizeof(Stereo)) == 0,
+          "nonzero SWAY audio is identical across different host block partitions");
+    CHECK(std::memcmp(reference.data(), replay.data(), reference.size() * sizeof(Stereo)) == 0,
+          "SWAY audio replays exactly after resetting the same seed and timeline");
+
+    // In UNDULATION mode, unused SWAY settings must not disturb established projects.
+    p.motionMode = 0;
+    p.undulationMinPercent = -30.0f; p.undulationMaxPercent = 60.0f;
+    const auto under = deterministicRender(a, p, 64, 1234567);
+    p.swayAmountMinPercent = 0.0f; p.swayAmountMaxPercent = 100.0f;
+    p.swaySpeedMinMs = 20000.0f; p.swaySpeedMaxMs = 20000.0f;
+    const auto underWithOtherSway = deterministicRender(b, p, 511, 1234567);
+    CHECK(std::memcmp(under.data(), underWithOtherSway.data(), under.size() * sizeof(Stereo)) == 0,
+          "unused SWAY parameters leave original UNDULATION audio unchanged");
+}
+
+void testSwaySpeedAndSmoothness() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    GrainEngine e;
+    constexpr double lowRate = 8000.0;
+    e.prepare(lowRate);
+    auto p = base();
+    p.motionMode = 1;
+    p.swayAmountMinPercent = 10.0f; p.swayAmountMaxPercent = 30.0f;
+    bool intervalBounds = true, smooth = true;
+    for (const auto range : { std::array<float, 2>{{ 25.0f, 20000.0f }},
+                              std::array<float, 2>{{ 500.0f, 1500.0f }},
+                              std::array<float, 2>{{ 1200.0f, 1200.0f }} }) {
+        p.swaySpeedMinMs = range[0]; p.swaySpeedMaxMs = range[1];
+        e.setParameters(p);
+        for (int n = -256; n <= 256; ++n) {
+            const double time = Access::swayKnotAt(e, n);
+            const double next = Access::swayKnotAt(e, n + 1);
+            const double interval = next - time;
+            intervalBounds = intervalBounds && interval >= range[0] - 0.001 &&
+                interval <= range[1] + 0.001 && interval > 0.0;
+            if (range[0] == range[1])
+                intervalBounds = intervalBounds && std::abs(interval - range[0]) < 0.001;
+            const auto sample = static_cast<std::int64_t>(std::llround(time * lowRate * 0.001));
+            for (int offset = -3; offset <= 3; ++offset) {
+                const float previous = Access::swayAt(e, sample + offset - 1);
+                const float current = Access::swayAt(e, sample + offset);
+                smooth = smooth && std::isfinite(current) && std::abs(current - previous) < 0.01f;
+            }
+        }
+    }
+    CHECK(intervalBounds, "every SWAY change interval lies inside the SPEED millisecond range");
+    CHECK(smooth, "SWAY joins its seeded targets smoothly at random clock boundaries");
+}
+
+void testSwayZeroDepthAndBaseAutomation() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    GrainEngine under, sway;
+    under.prepare(rate); sway.prepare(rate);
+    auto p = base();
+    p.undulationMinPercent = p.undulationMaxPercent = 0.0f;
+    p.motionMode = 0;
+    const auto steady = deterministicRender(under, p, 64, 7654321);
+    p.motionMode = 1;
+    p.swayAmountMinPercent = p.swayAmountMaxPercent = 0.0f;
+    const auto zeroDepth = deterministicRender(sway, p, 511, 7654321);
+    CHECK(std::memcmp(steady.data(), zeroDepth.data(), steady.size() * sizeof(Stereo)) == 0,
+          "zero SWAY amount renders exactly the same audio as zero UNDULATION");
+
+    constexpr double lowRate = 8000.0;
+    sway.prepare(lowRate);
+    p.mode = 0;
+    p.attackMinMs = p.attackMaxMs = 1.0f;
+    p.grainMinMs = p.grainMaxMs = 400.0f;
+    p.swayAmountMinPercent = p.swayAmountMaxPercent = 20.0f;
+    p.swaySpeedMinMs = 40.0f; p.swaySpeedMaxMs = 80.0f;
+    sway.setParameters(p);
+    constexpr std::int64_t origin = 123456;
+    sway.reset(origin);
+    auto previous = Access::firstEvent(sway);
+    bool centered = true;
+    int beforeAutomation = 0, afterAutomation = 0;
+    for (int n = 0; n < static_cast<int>(lowRate * 6.0); ++n) {
+        if (n == static_cast<int>(lowRate * 2.0)) {
+            p.grainMinMs = p.grainMaxMs = 500.0f;
+            sway.setParameters(p);
+        }
+        const double desired = p.grainMinMs * (1.0 + Access::swayAt(sway, origin + n));
+        sway.process(0.2f, 0.2f);
+        const auto event = Access::firstEvent(sway);
+        if (event.grainSerial != previous.grainSerial) {
+            const double actual = event.previousGrain * 1000.0 / lowRate;
+            centered = centered && std::abs(actual - desired) <= 0.13;
+            if (n < lowRate * 2.0) ++beforeAutomation; else ++afterAutomation;
+        }
+        previous = event;
+    }
+    CHECK(beforeAutomation >= 4 && afterAutomation >= 8,
+          "SWAY center test observes grains before and after GRAIN automation");
+    CHECK(centered, "SWAY depth remains relative to the current automated grain size");
+}
+
+void testSwayAutomationSafety() {
+    GrainEngine e;
+    constexpr double lowRate = 8000.0;
+    e.prepare(lowRate);
+    auto p = base();
+    p.mode = 0;
+    p.attackMinMs = p.attackMaxMs = 1.0f;
+    p.grainMinMs = 20.0f; p.grainMaxMs = 80.0f;
+    p.envMinPercent = 0.0f; p.envMaxPercent = 100.0f;
+    p.motionMode = 1;
+    e.setParameters(p); e.reset();
+    bool finite = true, fixedBudget = true;
+    double minimum = 1.0, maximum = -1.0, largestStep = 0.0;
+    float previous = 0.2f;
+    const auto memory = e.memoryBytes();
+    callbackAllocations = 0;
+    trackAllocation = true;
+    for (int n = 0; n < 80000; ++n) {
+        if (n % 47 == 0) {
+            p.motionMode = (n / 47) % 2;
+            p.swayAmountMinPercent = (n / 47) % 3 ? 0.0f : 100.0f;
+            p.swayAmountMaxPercent = (n / 47) % 5 ? 100.0f : 0.0f;
+            p.swaySpeedMinMs = (n / 47) % 3 ? 25.0f : 20000.0f;
+            p.swaySpeedMaxMs = (n / 47) % 5 ? 20000.0f : 25.0f;
+            e.setParameters(p);
+        }
+        const auto out = e.process(0.2f, 0.2f);
+        finite = finite && std::isfinite(out[0]) && std::isfinite(out[1]);
+        fixedBudget = fixedBudget && e.activeEvents() == 1;
+        if (n > 800) {
+            minimum = std::min(minimum, static_cast<double>(out[0]));
+            maximum = std::max(maximum, static_cast<double>(out[0]));
+            largestStep = std::max(largestStep, std::abs(static_cast<double>(out[0] - previous)));
+        }
+        previous = out[0];
+    }
+    trackAllocation = false;
+    CHECK(finite && minimum > 0.198 && maximum < 0.202 && largestStep < 0.002,
+          "rapid SWAY AMOUNT/SPEED/tab automation adds no DC tremolo, clicks, or non-finite output");
+    CHECK(fixedBudget && e.memoryBytes() == memory,
+          "SWAY tab and parameter changes keep the existing capture event and fixed resource budget");
+    CHECK(callbackAllocations.load() == 0, "SWAY clock and automation allocate no audio-thread memory");
+}
+
 void testFloodFiniteAndNoAllocations() {
     GrainEngine e;
     e.prepare(48000.0);
@@ -613,6 +838,11 @@ int main() {
     testLongUnequalGrainOverlap();
     testBypassPreservesInterstagePeaks();
     testEventGrainQuantileAndUndulation();
+    testSwayTimelineAndRange();
+    testSwayAudioDeterminism();
+    testSwaySpeedAndSmoothness();
+    testSwayZeroDepthAndBaseAutomation();
+    testSwayAutomationSafety();
     testFloodFiniteAndNoAllocations();
     if (failures != 0) {
         std::fprintf(stderr, "%d Grain engine check(s) failed.\n", failures);

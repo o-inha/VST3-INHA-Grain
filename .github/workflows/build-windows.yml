@@ -48,18 +48,18 @@ jobs:
           if (Get-ChildItem build/dist -Recurse -File | Where-Object { $_.Name -match 'Fixture|licen[cs]e\.key|licence\.key' }) { throw "Unexpected fixture or key in release" }
           $bytes = [IO.File]::ReadAllBytes("build/dist/INHA Grain.vst3/Contents/x86_64-win/INHA Grain.vst3")
           $ascii = [Text.Encoding]::ASCII.GetString($bytes)
-          foreach ($id in @('inha-grain', 'INHA-Grain-device-v1:', '0.1.0')) { if (-not $ascii.Contains($id)) { throw "Missing Grain identity: $id" } }
+          foreach ($id in @('inha-grain', 'INHA-Grain-device-v1:', '0.2.0')) { if (-not $ascii.Contains($id)) { throw "Missing Grain identity: $id" } }
       - name: Record build validation
         shell: pwsh
         run: |
           @"
-          INHA Grain 0.1.0 - Windows x64 VST3
+          INHA Grain 0.2.0 - Windows x64 VST3
           Source commit: ${{ github.sha }}
           Build: MSVC Release, static C++ runtime
           SDK: Steinberg VST3 3.7.14 build 55
           Passed: GrainEngineTests, GrainAutomationTests, GrainModuleSmoke, GrainEditorSmoke
           Passed: official Steinberg VST3 validator on the production bundle
-          Editor checked at 100% and 150%, light and dark themes.
+          Editor checked at 100% and 150%, light and dark themes, UNDULATION and SWAY tabs.
           Production licensing: INHA Core 0.1.2, product inha-grain.
           No licence key or test fixture included.
           Validation uses automated audio and VST3 hosts; listening in the user's DAW is the next review step.

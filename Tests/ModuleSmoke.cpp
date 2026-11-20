@@ -151,7 +151,7 @@ public:
         require(component->initialize(nullptr)==kResultOk,"Component initialize failed");
         require(component->queryInterface(IAudioProcessor_iid,reinterpret_cast<void**>(&audio))==kResultOk&&audio,"Audio processor interface missing");
         require(component->queryInterface(IEditController_iid,reinterpret_cast<void**>(&controller))==kResultOk&&controller,"Controller interface missing");
-        require(controller->getParameterCount()==24,"Parameter inventory changed unexpectedly");
+        require(controller->getParameterCount()==29,"Parameter inventory changed unexpectedly");
         require(audio->canProcessSampleSize(kSample32)==kResultTrue&&audio->canProcessSampleSize(kSample64)==kResultTrue,"Both sample formats required");
         IProcessContextRequirements* contextRequirements=nullptr;
         require(component->queryInterface(IProcessContextRequirements_iid,reinterpret_cast<void**>(&contextRequirements))==kResultOk&&contextRequirements,"VST3 process context requirements interface missing");
@@ -181,6 +181,92 @@ public:
 private:bool active=false,processing=false;
 };
 
+std::uint32_t stateWord(const MemoryStream& state,std::size_t offset)
+{
+    require(offset+sizeof(std::uint32_t)<=state.bytes.size(),"State header is truncated");
+    std::uint32_t value=0;std::memcpy(&value,state.bytes.data()+offset,sizeof(value));return value;
+}
+double stateValue(const MemoryStream& state,ParamID id)
+{
+    const auto offset=8+static_cast<std::size_t>(id)*sizeof(double);
+    require(offset+sizeof(double)<=state.bytes.size(),"State parameter payload is truncated");
+    double value=0;std::memcpy(&value,state.bytes.data()+offset,sizeof(value));return value;
+}
+void replaceStateWord(MemoryStream& state,std::size_t offset,std::uint32_t value)
+{
+    require(offset+sizeof(value)<=state.bytes.size(),"Cannot replace missing state header");
+    std::memcpy(state.bytes.data()+offset,&value,sizeof(value));
+}
+void replaceStateValue(MemoryStream& state,ParamID id,double value)
+{
+    const auto offset=8+static_cast<std::size_t>(id)*sizeof(double);
+    require(offset+sizeof(value)<=state.bytes.size(),"Cannot replace missing state parameter");
+    std::memcpy(state.bytes.data()+offset,&value,sizeof(value));
+}
+void stateCompatibility(Module& module)
+{
+    Instance instance(module);
+    ParameterInfo motionInfo{};
+    require(instance.controller->getParameterInfo(24,motionInfo)==kResultOk&&motionInfo.id==24
+            &&motionInfo.stepCount==1&&(motionInfo.flags&ParameterInfo::kIsList)!=0
+            &&(motionInfo.flags&ParameterInfo::kCanAutomate)!=0,
+            "Motion mode must be an appended, automatable two-item host list");
+    String128 motionText{};
+    require(instance.controller->getParamStringByValue(24,1.0,motionText)==kResultOk,
+            "Could not format SWAY mode for host");
+    const std::array<char16,5> expectedSway{{'S','W','A','Y',0}};
+    require(std::equal(expectedSway.begin(),expectedSway.end(),motionText),"Host motion list does not label SWAY correctly");
+    MemoryStream saved;
+    require(instance.component->getState(&saved)==kResultOk,"Could not save initial v2 state");
+    require(saved.bytes.size()==8+29*sizeof(double)&&stateWord(saved,0)==0x47524149u&&stateWord(saved,4)==2,
+            "Expected v2 state with 29 parameter values");
+    const auto setPlain=[&](ParamID id,double plain){replaceStateValue(saved,id,instance.normalized(id,plain));};
+    // UND and SWAY controls are independent banks, retained even while inactive.
+    setPlain(9,-35);setPlain(10,45);setPlain(11,75);setPlain(12,180);
+    setPlain(24,1);setPlain(25,17);setPlain(26,63);setPlain(27,250);setPlain(28,3500);
+    saved.position=0;
+    require(instance.component->setState(&saved)==kResultOk,"Could not restore SWAY v2 state");
+    MemoryStream restored;
+    require(instance.component->getState(&restored)==kResultOk&&saved.bytes==restored.bytes,
+            "SWAY state round trip lost mode or inactive UND/SWAY values");
+    require(instance.controller->getParamNormalized(24)==1.0,"SWAY mode was not restored");
+    saved.position=0;
+    require(instance.controller->setComponentState(&saved)==kResultOk,"Controller rejected SWAY state");
+    for(ParamID id:{9u,10u,11u,12u,24u,25u,26u,27u,28u})
+        require(instance.controller->getParamNormalized(id)==stateValue(saved,id),"Controller lost an independent motion parameter");
+
+    MemoryStream legacy;
+    legacy.bytes=saved.bytes;
+    legacy.bytes.resize(8+24*sizeof(double));
+    replaceStateWord(legacy,4,1);
+    require(instance.component->setState(&legacy)==kResultOk,"Existing v1 projects are not compatible");
+    MemoryStream migrated;
+    require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==2,
+            "Legacy project did not migrate to v2 state");
+    for(ParamID id=0;id<24;++id)
+        require(stateValue(migrated,id)==stateValue(legacy,id),"Migration changed a legacy parameter value");
+    require(stateValue(migrated,24)==0.0,"Legacy project did not default to UNDULATION");
+    for(const auto expected:std::array<std::pair<ParamID,double>,4>{{{25,10},{26,30},{27,500},{28,1500}}})
+        require(std::abs(stateValue(migrated,expected.first)-instance.normalized(expected.first,expected.second))<1e-12,
+                "Legacy project did not initialize a SWAY parameter to its declared default");
+
+    const auto rejected=[&](MemoryStream& invalid,const char* message)
+    {
+        invalid.position=0;
+        require(instance.component->setState(&invalid)!=kResultOk,message);
+        MemoryStream after;
+        require(instance.component->getState(&after)==kResultOk&&after.bytes==migrated.bytes,
+                "Rejected state partially changed the plugin");
+    };
+    MemoryStream invalid;invalid.bytes=saved.bytes;replaceStateWord(invalid,0,0);rejected(invalid,"Invalid state magic accepted");
+    invalid.bytes=saved.bytes;replaceStateWord(invalid,4,99);rejected(invalid,"Unknown future state version accepted");
+    invalid.bytes=saved.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated v2 parameter payload accepted");
+    invalid.bytes=legacy.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated legacy parameter payload accepted");
+    invalid.bytes.assign(4,0);rejected(invalid,"Truncated state header accepted");
+    require(instance.component->setState(nullptr)!=kResultOk,"Null state stream accepted");
+    std::cout<<"v1 compatibility, independent SWAY v2 state, and invalid-state rejection passed\n";
+}
+
 template<typename Sample> void formatSmoke(Module& module,int channels,int symbolic) {
     Instance instance(module);instance.stateRoundTrip();instance.setup(channels,symbolic);
     Changes parameters;parameters.add(23,0,1.0); // Bypass: exact unity dry after its click-free ramp.
@@ -201,13 +287,15 @@ template<typename Sample> void formatSmoke(Module& module,int channels,int symbo
 }
 
 std::vector<float> renderFixture(Module& module,int noteOffset,int wetAutomationOffset=-1,
-                                 int bypassAutomationOffset=-1) {
+                                 int bypassAutomationOffset=-1,int initialMotionMode=0,
+                                 int motionAutomationOffset=-1) {
     Instance instance(module);instance.setup(2,kSample32);
     Changes controls;
     const auto set=[&](ParamID id,double value){controls.add(id,0,instance.normalized(id,value));};
     set(0,2);set(1,100);set(4,20);set(5,10);set(6,10);set(7,0);set(8,0);
     set(9,0);set(10,0);set(13,1);set(14,1);set(15,200);set(16,200);
     set(17,0);set(18,0);set(19,0);set(20,0);
+    set(24,initialMotionMode);set(25,60);set(26,60);set(27,25);set(28,25);
     std::array<std::array<float,256>,2> input{},output{};
     float* ins[2]{input[0].data(),input[1].data()};float* outs[2]{output[0].data(),output[1].data()};
     AudioBusBuffers in{},out{};in.numChannels=out.numChannels=2;in.channelBuffers32=ins;out.channelBuffers32=outs;
@@ -219,7 +307,8 @@ std::vector<float> renderFixture(Module& module,int noteOffset,int wetAutomation
         Events events;if(block==0&&noteOffset>=0)events.note(noteOffset);
         Changes automation;if(block==4&&wetAutomationOffset>=0){automation.add(20,0,instance.normalized(20,0));automation.add(20,wetAutomationOffset,instance.normalized(20,-60));}
         if(block==4&&bypassAutomationOffset>=0)automation.add(23,bypassAutomationOffset,1.0);
-        const bool automate=block==4&&(wetAutomationOffset>=0||bypassAutomationOffset>=0);
+        if(block==4&&motionAutomationOffset>=0)automation.add(24,motionAutomationOffset,1.0);
+        const bool automate=block==4&&(wetAutomationOffset>=0||bypassAutomationOffset>=0||motionAutomationOffset>=0);
         data.inputEvents=&events;data.inputParameterChanges=block==0?&controls:(automate?&automation:nullptr);context.projectTimeSamples=block*256;
         require(instance.audio->process(data)==kResultOk,"Fixture render callback failed");
         for(float value:output[0]){require(std::isfinite(value),"Fixture produced non-finite audio");result.push_back(value);}
@@ -242,6 +331,15 @@ void fixtureOffsets(Module& module) {
     for(int i=0;i<1216;++i)require(bypassed[i]==note[i],"Discrete bypass automation ignored its in-block sample offset");
     double bypassDifference=0;for(std::size_t i=1400;i<note.size();++i)bypassDifference+=std::abs(bypassed[i]-note[i]);
     require(bypassDifference>0.001,"In-block bypass automation did not reach the DSP");
+    const auto sway=renderFixture(module,128,-1,-1,1);
+    const auto swayRepeated=renderFixture(module,128,-1,-1,1);
+    require(sway==swayRepeated,"SWAY host render did not repeat deterministically");
+    double swayDifference=0;for(std::size_t i=512;i<note.size();++i)swayDifference+=std::abs(sway[i]-note[i]);
+    require(swayDifference>0.001,"SWAY mode did not affect granular audio through host parameters");
+    const auto motionAutomated=renderFixture(module,128,-1,-1,0,192);
+    for(int i=0;i<1216;++i)require(motionAutomated[i]==note[i],"Motion mode automation applied before its sample offset");
+    double motionDifference=0;for(std::size_t i=1400;i<note.size();++i)motionDifference+=std::abs(motionAutomated[i]-note[i]);
+    require(motionDifference>0.001,"Automated motion mode did not change an active event");
     std::cout<<"Fixture MIDI offsets, seeded repeats, and host automation passed\n";
 }
 }
@@ -250,7 +348,7 @@ int wmain(int argc,wchar_t** argv) {
     try{
         require(argc==3,"Usage: GrainModuleSmoke <production-vst3-binary> <fixture-binary>");
         {Module production(argv[1]);formatSmoke<float>(production,1,kSample32);formatSmoke<float>(production,2,kSample32);formatSmoke<double>(production,1,kSample64);formatSmoke<double>(production,2,kSample64);}
-        {Module fixture(argv[2]);fixtureOffsets(fixture);}
+        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);}
         std::cout<<"Grain Windows module smoke passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

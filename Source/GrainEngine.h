@@ -24,6 +24,9 @@ struct Parameters
     float dryDb = 0.0f, wetDb = 0.0f;
     std::uint32_t seed = 254743703u;
     bool bypass = false;
+    int motionMode = 0; // UNDULATION, SWAY; each mode retains its own ranges.
+    float swayAmountMinPercent = 10.0f, swayAmountMaxPercent = 30.0f;
+    float swaySpeedMinMs = 500.0f, swaySpeedMaxMs = 1500.0f;
 };
 
 // No SDK, locks, allocation, file access, or bulk copies on the audio path.
@@ -98,6 +101,8 @@ private:
     float pick (float minimum, float maximum, std::uint64_t key,
                 std::uint64_t domain) const noexcept;
     std::uint64_t samplesForMs (double ms) const noexcept;
+    double swayKnotTime (std::int64_t index) const noexcept;
+    float swayValue (std::int64_t absoluteSample) const noexcept;
     void retire (Event&, double milliseconds) noexcept;
     Event* startEvent (bool live, bool held, std::uint64_t ordinal) noexcept;
     void startRelease (Event&) noexcept;

@@ -15,6 +15,7 @@
 #include "pluginterfaces/vst/ivstevents.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -201,6 +202,15 @@ public:
         SendMessageW (window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM (x, y));
         SendMessageW (window, WM_LBUTTONUP, 0, MAKELPARAM (x, y));
     }
+    void doubleClickAt (int logicalX, int logicalY)
+    {
+        const auto scale = size().getWidth() >= 660 ? 1.5 : 1.0;
+        const auto x = static_cast<int> (std::lround (logicalX * scale));
+        const auto y = static_cast<int> (std::lround (logicalY * scale));
+        SendMessageW (window, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM (x, y));
+        SendMessageW (window, WM_LBUTTONUP, 0, MAKELPARAM (x, y));
+        SendMessageW (window, WM_TIMER, 1, 0);
+    }
     ParamID parameter (const char* name) const
     {
         for (int32 index = 0; index < controller->getParameterCount(); ++index)
@@ -362,6 +372,93 @@ void savePreview (Editor& editor, const std::filesystem::path& directory, const 
     image.save (directory / filename);
 }
 
+double motionValue(const Editor& editor,ParamID id)
+{
+    return editor.controller->getParamNormalized(id);
+}
+
+void clickMotionTab(Editor& editor,bool sway)
+{
+    editor.moveTo(sway?168:77,185);
+    editor.clickAt(sway?168:77,185);
+    editor.settleFooter();
+    require(motionValue(editor,24)==(sway?1.0:0.0),"Motion tab did not select UNDULATION/SWAY");
+    const auto image=capture(editor);
+    const auto panel=image.logicalPixel(26,203);
+    const auto und=image.logicalPixel(26,180);
+    const auto sw=image.logicalPixel(198,180);
+    require((sway?sw:und)==panel,"Active motion tab does not share its attached panel background");
+    require((sway?und:sw)!=panel,"Inactive motion tab did not use the plugin background");
+}
+
+void swayPreview(Editor& editor,const std::filesystem::path& directory,const wchar_t* filename)
+{
+    clickMotionTab(editor,true);
+    savePreview(editor,directory,filename);
+    clickMotionTab(editor,false);
+}
+
+void motionControlBanks(Editor& editor,const std::filesystem::path& directory)
+{
+    const auto undAmount=std::array<double,2>{motionValue(editor,9),motionValue(editor,10)};
+    const auto undSpeed=std::array<double,2>{motionValue(editor,11),motionValue(editor,12)};
+    clickMotionTab(editor,true);
+    const auto swayAmount=std::array<double,2>{motionValue(editor,25),motionValue(editor,26)};
+    const auto swaySpeed=std::array<double,2>{motionValue(editor,27),motionValue(editor,28)};
+    editor.dragAt(66,253,235);
+    require(motionValue(editor,25)!=swayAmount[0]||motionValue(editor,26)!=swayAmount[1],
+            "SWAY AMOUNT knob did not edit its own parameter bank");
+    require(motionValue(editor,9)==undAmount[0]&&motionValue(editor,10)==undAmount[1],
+            "SWAY AMOUNT drag changed the inactive UNDULATION values");
+    editor.dragAt(156,253,235);
+    require(motionValue(editor,27)!=swaySpeed[0]||motionValue(editor,28)!=swaySpeed[1],
+            "SWAY SPEED knob did not edit its own millisecond parameter bank");
+    require(motionValue(editor,11)==undSpeed[0]&&motionValue(editor,12)==undSpeed[1],
+            "SWAY SPEED drag changed the inactive UNDULATION values");
+    const auto retainedAmount=std::array<double,2>{motionValue(editor,25),motionValue(editor,26)};
+    const auto retainedSpeed=std::array<double,2>{motionValue(editor,27),motionValue(editor,28)};
+    clickMotionTab(editor,false);
+    require(motionValue(editor,9)==undAmount[0]&&motionValue(editor,10)==undAmount[1]
+            &&motionValue(editor,11)==undSpeed[0]&&motionValue(editor,12)==undSpeed[1],
+            "Changing motion tabs did not retain UNDULATION values");
+    editor.dragAt(66,253,235);
+    require(motionValue(editor,9)!=undAmount[0]||motionValue(editor,10)!=undAmount[1],
+            "UNDULATION AMOUNT knob stopped editing its original parameters");
+    editor.dragAt(156,253,235);
+    require(motionValue(editor,11)!=undSpeed[0]||motionValue(editor,12)!=undSpeed[1],
+            "UNDULATION SPEED knob stopped editing its original parameters");
+    require(motionValue(editor,25)==retainedAmount[0]&&motionValue(editor,26)==retainedAmount[1]
+            &&motionValue(editor,27)==retainedSpeed[0]&&motionValue(editor,28)==retainedSpeed[1],
+            "UNDULATION drags changed the independent SWAY values");
+    clickMotionTab(editor,true);
+    savePreview(editor,directory,L"grain-sway-edited-100.png");
+    clickMotionTab(editor,false);
+}
+
+void motionDefaultReset(Editor& editor)
+{
+    const auto expect=[&](ParamID id,double plain)
+    {
+        const auto actual=editor.controller->normalizedParamToPlain(id,motionValue(editor,id));
+        require(std::abs(actual-plain)<1e-8,"Double-click did not restore the declared control default");
+    };
+    const auto und=std::array<double,4>{motionValue(editor,9),motionValue(editor,10),
+                                      motionValue(editor,11),motionValue(editor,12)};
+    clickMotionTab(editor,true);
+    editor.doubleClickAt(66,253);expect(25,10);expect(26,30);
+    editor.doubleClickAt(156,253);expect(27,500);expect(28,1500);
+    for(ParamID id=9;id<=12;++id)
+        require(motionValue(editor,id)==und[id-9],"Resetting SWAY changed the inactive UNDULATION range");
+    const auto sway=std::array<double,4>{motionValue(editor,25),motionValue(editor,26),
+                                       motionValue(editor,27),motionValue(editor,28)};
+    clickMotionTab(editor,false);
+    editor.doubleClickAt(66,253);expect(9,0);expect(10,50);
+    editor.doubleClickAt(156,253);expect(11,50);expect(12,200);
+    for(ParamID id=25;id<=28;++id)
+        require(motionValue(editor,id)==sway[id-25],"Resetting UNDULATION changed the inactive SWAY range");
+    editor.doubleClickAt(156,91);expect(4,2000);
+}
+
 void testEditor (Module& module, const std::filesystem::path& directory)
 {
     {
@@ -371,6 +468,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
                  "New Grain editor must open at 150 percent");
         require (!preferenceEnabled (L"ThemeDark"), "Isolated preferences did not start light");
         savePreview (editor,directory,L"grain-light-150.png");
+        swayPreview(editor,directory,L"grain-light-sway-150.png");
 
         // Footer actions become clickable only when the settings gear is open.
         editor.clickAt (87,footerMiddle);
@@ -383,14 +481,18 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         clickSetting(editor,87);
         require(preferenceEnabled(L"ThemeDark"),"Settings theme control did not persist dark mode");
         savePreview(editor,directory,L"grain-dark-150.png");
+        swayPreview(editor,directory,L"grain-dark-sway-150.png");
         clickSetting(editor,119);
         require(editor.size().getWidth()==524 && editor.size().getHeight()==366,
                 "Settings zoom control did not resize to 100 percent");
         require(editor.frame.resizeCount>0,"Zoom did not notify the host frame");
         savePreview(editor,directory,L"grain-dark-100.png");
+        swayPreview(editor,directory,L"grain-dark-sway-100.png");
         clickSetting(editor,87);
         require(!preferenceEnabled(L"ThemeDark"),"Settings theme did not return to light mode");
         savePreview(editor,directory,L"grain-light-100.png");
+        swayPreview(editor,directory,L"grain-light-sway-100.png");
+        motionControlBanks(editor,directory);
 
         // Check meaningful controls through Windows messages, as a VST3 host sees them.
         const auto scatter=editor.plain("Capture scatter");
@@ -401,6 +503,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         require(editor.plain("Grain minimum")!=grainMin || editor.plain("Grain maximum")!=grainMax,
                 "GRAIN range knob did not respond to drag");
         require(editor.plain("Grain minimum")<=editor.plain("Grain maximum"),"Range handles crossed");
+        motionDefaultReset(editor);
 
         editor.moveTo(450,14);editor.settleFooter();editor.clickAt(450,14);editor.settleFooter();
         editor.clickAt(450,104);editor.settleFooter();

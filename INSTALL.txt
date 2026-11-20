@@ -1,4 +1,4 @@
-INHA Grain 0.1.0 - Windows x64 VST3
+INHA Grain 0.2.0 - Windows x64 VST3
 
 1. Close your DAW.
 2. Copy the entire "INHA Grain.vst3" folder to:
@@ -16,5 +16,6 @@ Drag controls vertically; Shift gives fine adjustment. For ranges, Ctrl moves
 both ends together and Alt changes the width. Double-click resets a control.
 Use the gear in the footer for light/dark theme and 100%/150% size.
 
-This is a first development version. Read README.md for capture, undulation
-and repeatability behavior.
+Read README.md for capture, UNDULATION/SWAY and repeatability behavior.
+Existing 0.1.0 project settings load in UNDULATION mode with their original
+parameters. Each motion tab retains its own AMOUNT/SPEED settings.
