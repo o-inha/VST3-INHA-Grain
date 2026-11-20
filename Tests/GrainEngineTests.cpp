@@ -639,6 +639,87 @@ void testSyncPicksStayOnMusicalGrid() {
           "SYNC grains stay on musical durations while startup capture and BUFFER cap their effective length");
 }
 
+void testTripletGrainPoolsAndIndependentBufferCap() {
+    using Access = InhaGrain::GrainEngineTestAccess;
+    namespace Timing = InhaGrain::Timing;
+    constexpr double lowRate = 8000.0;
+    GrainEngine e;
+    e.prepare(lowRate);
+    auto p = base();
+    p.mode = 3; p.synced = true; p.tempoBpm = 120.0f;
+    p.durationMinimumMs = 125.0f; p.durationMaximumMs = 4000.0f;
+    p.scatterMs = 2000.0f;
+    p.grainMinMs = p.grainMaxMs = 1000.0f / 3.0f;
+    p.attackMinMs = p.attackMaxMs = 1000.0f / 3.0f;
+    p.releaseMinMs = p.releaseMaxMs = 2000.0f / 3.0f;
+    const auto framesFor = [lowRate](double ms) { return static_cast<std::uint32_t>(std::llround(ms * lowRate * 0.001)); };
+    const auto gridIndex = [&](std::uint32_t frames, bool triplets) {
+        for (std::size_t step = 0; step < Timing::choiceCount(triplets); ++step)
+            if (framesFor(Timing::choiceBeats(step, triplets) * 500.0) == frames)
+                return static_cast<int>(step);
+        return -1;
+    };
+    const auto render = [&](Parameters values) {
+        e.setParameters(values); e.reset(87531);
+        auto previous = Access::firstEvent(e);
+        bool valid = true, onGrid = true;
+        for (int n = 0; n < static_cast<int>(lowRate); ++n) {
+            e.process(0.2f, 0.2f);
+            const auto current = Access::firstEvent(e);
+            if (current.grainSerial != previous.grainSerial)
+                onGrid = onGrid && gridIndex(current.previousGrain, values.grainTriplets) >= 0;
+            valid = valid && Access::validSlices(e);
+            previous = current;
+        }
+        CHECK(valid && onGrid, "triplet grain choices stay on their own enabled grid and within fully captured source");
+        return Access::firstEvent(e);
+    };
+    p.grainTriplets = true;
+    const auto triplet = render(p);
+    CHECK(triplet.previousGrain == framesFor(1000.0 / 3.0),
+          "GRAIN T permits a quarter-note triplet duration in the actual DSP");
+    p.grainTriplets = false;
+    const auto straight = render(p);
+    CHECK(gridIndex(straight.previousGrain, false) >= 0 && straight.previousGrain != triplet.previousGrain,
+          "turning GRAIN T off excludes triplet lengths from launched grains");
+    CHECK(triplet.attack == straight.attack && triplet.release == straight.release &&
+          gridIndex(static_cast<std::uint32_t>(triplet.attack), false) >= 0 &&
+          gridIndex(static_cast<std::uint32_t>(triplet.release), false) >= 0,
+          "GRAIN T leaves attack and release on their original independent straight-note grid");
+    p.bufferTriplets = true; p.scatterMs = 1000.0f / 3.0f;
+    p.grainMinMs = p.grainMaxMs = 500.0f;
+    const auto mixed = render(p);
+    CHECK(mixed.previousGrain == framesFor(250.0),
+          "triplet BUFFER with straight-only GRAIN floors effective length to a valid captured straight note");
+    p.grainTriplets = true;
+    const auto mixedTriplets = render(p);
+    CHECK(mixedTriplets.previousGrain == framesFor(1000.0 / 3.0),
+          "enabling GRAIN T independently allows its triplet BUFFER cap exactly");
+    p.bufferTriplets = false;
+    const auto sameResolvedBuffer = render(p);
+    CHECK(sameResolvedBuffer.previousGrain == mixedTriplets.previousGrain &&
+          sameResolvedBuffer.grainQuantile == mixedTriplets.grainQuantile,
+          "BUFFER T does not alter grain choices when the resolved source duration is unchanged");
+
+    p.scatterMs = 2000.0f; p.grainMinMs = 125.0f; p.grainMaxMs = 500.0f;
+    bool choseTriplet = false, choseStraight = false;
+    for (std::uint32_t seed = 1; seed <= 24; ++seed) {
+        p.seed = seed;
+        const auto event = render(p);
+        const auto index = gridIndex(event.previousGrain, true);
+        choseTriplet = choseTriplet || (index >= 0 && index % 2 != 0);
+        choseStraight = choseStraight || (index >= 0 && index % 2 == 0);
+    }
+    CHECK(choseTriplet && choseStraight, "enabled GRAIN T includes straight and triplet choices in the same range");
+
+    p = base();
+    const auto freeStraight = deterministicRender(e, p, 64, 98765);
+    p.bufferTriplets = p.grainTriplets = true;
+    const auto freeTriplets = deterministicRender(e, p, 511, 98765);
+    CHECK(std::memcmp(freeStraight.data(), freeTriplets.data(), freeStraight.size() * sizeof(Stereo)) == 0,
+          "BUFFER and GRAIN triplet options have no effect outside SYNC");
+}
+
 void testLongUnequalGrainOverlap() {
     GrainEngine e;
     constexpr double lowRate = 8000.0;
@@ -1152,6 +1233,7 @@ int main() {
     testMassPanAndCaptureBoundaries();
     testFrozenBufferAutomationAndDirtyResets();
     testSyncPicksStayOnMusicalGrid();
+    testTripletGrainPoolsAndIndependentBufferCap();
     testLongUnequalGrainOverlap();
     testBypassPreservesInterstagePeaks();
     testEventGrainQuantileAndUndulation();

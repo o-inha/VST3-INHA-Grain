@@ -534,6 +534,165 @@ void noneModeDisablesEventControls(Editor& editor,const std::filesystem::path& d
     editor.doubleClickAt(61,253);
 }
 
+int colourDistance(COLORREF a,COLORREF b)
+{
+    return std::abs(static_cast<int>(GetRValue(a))-GetRValue(b))
+        +std::abs(static_cast<int>(GetGValue(a))-GetGValue(b))
+        +std::abs(static_cast<int>(GetBValue(a))-GetBValue(b));
+}
+
+void tripletControlAppearance(Editor& editor,const std::filesystem::path& directory,const std::wstring& prefix,bool dark)
+{
+    const auto scale=editor.size().getWidth()>=660?1.5:1.0;
+    const auto physical=[&](int value){return static_cast<int>(std::lround(value*scale));};
+    const auto set=[&](ParamID id,double value)
+    {
+        require(editor.controller->setParamNormalized(id,value)==kResultOk,"Cannot configure triplet UI parameter");
+        SendMessageW(editor.window,WM_TIMER,1,0);
+    };
+    const auto value=[&](ParamID id){return editor.controller->getParamNormalized(id);};
+    const auto saved=std::array<double,6>{value(4),value(5),value(6),value(29),value(33),value(34)};
+    set(29,0);set(33,0);set(34,0);
+    editor.clickAt(237,45);editor.clickAt(309,45);
+    require(value(33)==0&&value(34)==0,"Disabled T buttons remained clickable without SYNC");
+    editor.clickAt(458,14);editor.moveTo(200,330);editor.settleFooter();
+    auto inactive=capture(editor);
+    editor.clickAt(237,45);
+    require(value(33)==1&&value(34)==0,"BUFFER T button changed the wrong triplet bank");
+    editor.clickAt(309,45);editor.moveTo(200,330);editor.settleFooter();
+    require(value(33)==1&&value(34)==1,"GRAIN T button did not enable its independent triplet bank");
+    auto active=capture(editor);active.save(directory/(prefix+L"-triplets-on.png"));
+    const auto ink=dark?RGB(225,225,224):RGB(16,16,16);
+    const auto panel=inactive.logicalPixel(200,35);
+    std::array<double,2> labelGaps{};
+    for(int index=0;index<2;++index)
+    {
+        const int faceLeft=index==0?232:304,centre=index==0?212:288;
+        require(active.logicalPixel(faceLeft+1,49)==ink
+                &&inactive.logicalPixel(faceLeft+1,49)==panel,
+                "T button did not use the INHA filled/outlined toggle face");
+        require(inactive.logicalPixel(faceLeft,43)!=panel,"Inactive T button outline was missing");
+        int inversePixels=0;
+        for(int y=physical(41);y<physical(50);++y)
+            for(int x=physical(faceLeft+1);x<physical(faceLeft+9);++x)
+                inversePixels+=colourDistance(active.pixel(x,y),panel)<180;
+        require(inversePixels>2,"Active T button did not invert its text over the filled face");
+        int labelRight=0;
+        for(int y=physical(38);y<physical(52);++y)
+            for(int x=physical(centre-39);x<physical(faceLeft);++x)
+                if(colourDistance(inactive.pixel(x,y),panel)>60)labelRight=std::max(labelRight,x);
+        labelGaps[index]=faceLeft-static_cast<double>(labelRight)/scale;
+        require(labelRight>0&&labelGaps[index]>=2&&labelGaps[index]<=9,
+                "BUFFER/GRAIN label did not retain normal spacing before its T button");
+    }
+    require(std::abs(labelGaps[0]-labelGaps[1])<=1.5,"BUFFER and GRAIN T buttons use inconsistent label gaps");
+    editor.clickAt(458,14);editor.clickAt(237,45);editor.clickAt(309,45);
+    require(value(29)==0&&value(33)==1&&value(34)==1,"Disabling SYNC lost retained triplet settings");
+    editor.moveTo(200,330);editor.settleFooter();
+    auto disabled=capture(editor);disabled.save(directory/(prefix+L"-triplets-disabled.png"));
+
+    // Compare musical durations, not normalized positions from different pools.
+    const auto pinkValues=[](const Capture& image)
+    {
+        int count=0;
+        for(int y=130;y<159;++y)for(int x=249;x<328;++x)
+        {
+            const auto colour=image.logicalPixel(x,y);
+            count+=GetRValue(colour)>180&&GetRValue(colour)>GetGValue(colour)+25
+                &&GetBValue(colour)>GetGValue(colour)+10;
+        }
+        return count;
+    };
+    set(29,1);set(33,0);set(34,1);set(4,0.1);set(5,0.1);set(6,0.1);
+    editor.settleFooter();
+    require(pinkValues(capture(editor))==0,"Allowed GRAIN triplet was incorrectly capped by straight BUFFER");
+    set(33,1);set(34,0);editor.settleFooter();
+    auto limited=capture(editor);limited.save(directory/(prefix+L"-triplet-buffer-cap.png"));
+    require(pinkValues(limited)>5,"Straight GRAIN exceeding triplet BUFFER did not show its capped value");
+    require(value(5)==0.1&&value(6)==0.1,"Triplet BUFFER cap destroyed the requested GRAIN positions");
+    for(std::size_t i=0;i<saved.size();++i)set(std::array<ParamID,6>{4,5,6,29,33,34}[i],saved[i]);
+    editor.settleFooter();
+}
+
+void headerAppearance(Editor& editor,const std::filesystem::path& directory,const wchar_t* appearance,bool dark)
+{
+    constexpr int syncLeft=440,syncRight=487,menuLeft=378,menuRight=461;
+    const auto scale=editor.size().getWidth()>=660?1.5:1.0;
+    const auto physical=[&](int value){return static_cast<int>(std::lround(value*scale));};
+    const auto savedMode=editor.controller->getParamNormalized(editor.parameter("Trigger mode"));
+    const std::wstring prefix=L"grain-header-"+std::wstring(appearance);
+    editor.set("Tempo sync",0);editor.moveTo(200,330);editor.settleFooter();
+    auto off=capture(editor);off.save(directory/(prefix+L"-sync-off.png"));
+    editor.clickAt(458,14);editor.moveTo(200,330);editor.settleFooter();
+    require(editor.plain("Tempo sync")==1,"Header SYNC toggle did not activate");
+    auto on=capture(editor);on.save(directory/(prefix+L"-sync-on.png"));
+    const auto offBackground=off.logicalPixel(syncLeft+2,4),onBackground=on.logicalPixel(syncLeft+2,4);
+    require(offBackground!=onBackground,"Active SYNC did not change its button background");
+    require(on.logicalPixel(syncLeft,4)==onBackground&&on.logicalPixel(syncRight-1,4)==onBackground,
+            "SYNC background did not fill its compact right-aligned button");
+    require(on.logicalPixel(syncLeft-1,4)==off.logicalPixel(syncLeft-1,4),
+            "SYNC background crossed into the adjacent trigger selector");
+    for(int x=syncLeft+4;x<syncRight-4;++x)
+        require(on.logicalPixel(x,23)==onBackground,"Active SYNC still draws an underline");
+
+    // Compare foreground coverage after subtracting each background. ClearType
+    // changes fringe RGB values when the background changes, even for fixed ink.
+    const auto ink=dark?RGB(225,225,224):RGB(16,16,16);
+    const auto channel=[](COLORREF colour,int index)->double
+    {
+        return index==0?GetRValue(colour):index==1?GetGValue(colour):GetBValue(colour);
+    };
+    double coverageDifference=0,offCoverage=0,onCoverage=0;
+    std::size_t foregroundChannels=0;
+    int rightmostInk=0;
+    for(int y=physical(5);y<physical(22);++y)
+        for(int x=physical(syncLeft);x<physical(syncRight);++x)
+        {
+            const auto a=off.pixel(x,y),b=on.pixel(x,y);
+            if(colourDistance(a,offBackground)>45)rightmostInk=std::max(rightmostInk,x);
+            for(int c=0;c<3;++c)
+            {
+                const auto alphaOff=(channel(a,c)-channel(offBackground,c))/(channel(ink,c)-channel(offBackground,c));
+                const auto alphaOn=(channel(b,c)-channel(onBackground,c))/(channel(ink,c)-channel(onBackground,c));
+                if(std::abs(alphaOff)<0.05&&std::abs(alphaOn)<0.05)continue;
+                coverageDifference+=std::abs(alphaOff-alphaOn);
+                offCoverage+=alphaOff;onCoverage+=alphaOn;++foregroundChannels;
+            }
+        }
+    require(foregroundChannels>30&&offCoverage>10&&onCoverage>10,"SYNC text was missing in one toggle state");
+    require(coverageDifference/foregroundChannels<0.12,"SYNC changed foreground ink between its active and inactive states");
+    const auto rightPadding=syncRight-static_cast<double>(rightmostInk)/scale;
+    require(rightPadding>=8&&rightPadding<=13,"SYNC text did not use the normal right-side padding");
+
+    editor.clickAt(458,14);editor.moveTo(439,14);editor.settleFooter();
+    require(editor.plain("Tempo sync")==0,"Trigger/SYNC boundary unexpectedly toggled synchronization");
+    auto menu=capture(editor);menu.save(directory/(prefix+L"-trigger-menu.png"));
+    const auto menuBackground=menu.logicalPixel(menuLeft+2,30);
+    require(menu.logicalPixel(menuLeft,30)==menuBackground&&menu.logicalPixel(menuRight-1,30)==menuBackground,
+            "Trigger selector does not abut SYNC or popup does not use its compact width");
+    require(menu.logicalPixel(menuLeft-1,30)!=menuBackground&&menu.logicalPixel(menuRight,30)!=menuBackground,
+            "Trigger popup retained excess horizontal padding");
+    std::array<double,4> widths{};
+    for(int row=0;row<4;++row)
+    {
+        int left=physical(menuRight),right=physical(menuLeft),pixels=0;
+        for(int y=physical(27+row*22+3);y<physical(27+(row+1)*22-3);++y)
+            for(int x=physical(menuLeft);x<physical(menuRight);++x)
+                if(colourDistance(menu.pixel(x,y),menuBackground)>75)
+                {left=std::min(left,x);right=std::max(right,x);++pixels;}
+        require(pixels>15,"A full trigger-menu entry was missing");
+        require(static_cast<double>(left)/scale-menuLeft>=7
+                &&menuRight-static_cast<double>(right)/scale>=7,
+                "A full trigger-menu entry was clipped or lacked normal padding");
+        widths[row]=static_cast<double>(right-left+1)/scale;
+    }
+    require(widths[1]>widths[0]+15&&widths[1]>widths[3]+10&&widths[2]>widths[3]+5,
+            "Trigger popup replaced full menu entries with compact header labels");
+    editor.moveTo(200,330);editor.settleFooter();
+    editor.set("Trigger mode",savedMode);
+    tripletControlAppearance(editor,directory,prefix,dark);
+}
+
 void testEditor (Module& module, const std::filesystem::path& directory)
 {
     {
@@ -544,6 +703,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         require (!preferenceEnabled (L"ThemeDark"), "Isolated preferences did not start light");
         savePreview (editor,directory,L"grain-light-150.png");
         swayPreview(editor,directory,L"grain-light-sway-150.png");
+        headerAppearance(editor,directory,L"light-150",false);
 
         // Footer actions become clickable only when the settings gear is open.
         editor.clickAt (87,footerMiddle);
@@ -557,16 +717,19 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         require(preferenceEnabled(L"ThemeDark"),"Settings theme control did not persist dark mode");
         savePreview(editor,directory,L"grain-dark-150.png");
         swayPreview(editor,directory,L"grain-dark-sway-150.png");
+        headerAppearance(editor,directory,L"dark-150",true);
         clickSetting(editor,119);
         require(editor.size().getWidth()==500 && editor.size().getHeight()==366,
                 "Settings zoom control did not resize to 100 percent");
         require(editor.frame.resizeCount>0,"Zoom did not notify the host frame");
         savePreview(editor,directory,L"grain-dark-100.png");
         swayPreview(editor,directory,L"grain-dark-sway-100.png");
+        headerAppearance(editor,directory,L"dark-100",true);
         clickSetting(editor,87);
         require(!preferenceEnabled(L"ThemeDark"),"Settings theme did not return to light mode");
         savePreview(editor,directory,L"grain-light-100.png");
         swayPreview(editor,directory,L"grain-light-sway-100.png");
+        headerAppearance(editor,directory,L"light-100",false);
         motionControlBanks(editor,directory);
         bufferCapAndNewControls(editor,directory);
         noneModeDisablesEventControls(editor,directory);

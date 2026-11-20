@@ -1,4 +1,4 @@
-INHA Grain 0.3.1 - Windows x64 VST3
+INHA Grain 0.3.2 - Windows x64 VST3
 
 1. Close your DAW.
 2. Copy the entire "INHA Grain.vst3" folder to:
@@ -24,3 +24,5 @@ Free durations: 40 MS to 6 S. SYNC: 1/16 note to 2 bars (4/4).
 MASS selects 1x to 8x parallel streams. PAN varies each grain's stereo balance.
 BUFFER caps the effective GRAIN size; pink values identify requested ranges
 that currently exceed BUFFER. Raising BUFFER restores those requested sizes.
+
+In SYNC mode, T beside BUFFER and GRAIN independently adds triplet divisions.

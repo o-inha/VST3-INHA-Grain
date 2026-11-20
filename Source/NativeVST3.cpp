@@ -94,7 +94,7 @@ enum Parameter : ParamID {
  attackMinimum, attackMaximum, releaseMinimum, releaseMaximum, duckDry, duckPrevious,
  dryLevel, wetLevel, seedHigh, seedLow, bypass,
  motionMode, swayAmountMinimum, swayAmountMaximum, swaySpeedMinimum, swaySpeedMaximum,
- tempoSync, mass, panMinimum, panMaximum, parameterCount
+ tempoSync, mass, panMinimum, panMaximum, bufferTriplets, grainTriplets, parameterCount
 };
 struct ParamSpec { const char* title; const char* shortTitle; const char* unit;
  double minimum, maximum, defaultValue; bool time; };
@@ -131,7 +131,9 @@ constexpr std::array<ParamSpec,parameterCount> specs {{
  {"Tempo sync","Sync","",0,1,0,false},
  {"Grain mass","Mass","x",1,8,1,false},
  {"Grain pan minimum","Pan min","%",-100,100,0,false},
- {"Grain pan maximum","Pan max","%",-100,100,0,false}
+ {"Grain pan maximum","Pan max","%",-100,100,0,false},
+ {"Buffer triplets","Buffer T","",0,1,0,false},
+ {"Grain triplets","Grain T","",0,1,0,false}
 }};
 bool iidEqual (const TUID a, const TUID b) noexcept
 {
@@ -173,10 +175,10 @@ double clampNormal (double value) noexcept
 }
 
 
-bool isButtonParameter(ParamID id) noexcept { return id==triggerMode || id==motionMode || id==tempoSync || id==mass || id==bypass || id==seedHigh || id==seedLow; }
+bool isButtonParameter(ParamID id) noexcept { return id==triggerMode || id==motionMode || id==tempoSync || id==bufferTriplets || id==grainTriplets || id==mass || id==bypass || id==seedHigh || id==seedLow; }
 double quantizeNormal(ParamID id,double x) noexcept {
  x=clampNormal(x); if(id==triggerMode) return std::round(x*3.0)/3.0;
- if(id==bypass || id==motionMode || id==tempoSync) return x>=0.5?1.0:0.0;
+ if(id==bypass || id==motionMode || id==tempoSync || id==bufferTriplets || id==grainTriplets) return x>=0.5?1.0:0.0;
  if(id==seedHigh || id==seedLow) return std::round(x*65535.0)/65535.0;
  if(id==mass) return std::round(x*7.0)/7.0;
  return x;
@@ -196,7 +198,7 @@ const char* choiceName(ParamID id,double plain) {
  if(id==triggerMode) { constexpr const char* names[]{"NONE","TRANSIENTS","MIDI NOTES","VOLUME"};
  return names[std::clamp(static_cast<int>(std::lround(plain)),0,3)]; }
  if(id==motionMode) return plain>=0.5?"SWAY":"UNDULATION";
- return id==bypass||id==tempoSync?(plain>=0.5?"ON":"OFF"):nullptr;
+ return id==bypass||id==tempoSync||id==bufferTriplets||id==grainTriplets?(plain>=0.5?"ON":"OFF"):nullptr;
 }
 std::wstring displayValue(ParamID id,double value) {
  wchar_t text[64]{};
@@ -216,9 +218,9 @@ std::wstring displayValue(ParamID id,double value) {
  else std::swprintf(text,64,L"%.0f%%",value);
  return text;
 }
-struct SavedStateHeader { std::uint32_t magic=0x47524149u,version=3; };
-constexpr std::size_t stateV1ParameterCount = 24, stateV2ParameterCount = 29;
-static_assert (bypass == 23 && motionMode == stateV1ParameterCount && tempoSync == stateV2ParameterCount && parameterCount == 33);
+struct SavedStateHeader { std::uint32_t magic=0x47524149u,version=4; };
+constexpr std::size_t stateV1ParameterCount = 24, stateV2ParameterCount = 29, stateV3ParameterCount = 33;
+static_assert (bypass == 23 && motionMode == stateV1ParameterCount && tempoSync == stateV2ParameterCount && bufferTriplets == stateV3ParameterCount && parameterCount == 35);
 constexpr std::size_t maximumAutomationPoints=2048;
 using ParameterTimeline=InhaAutomation::Timeline<parameterCount,maximumAutomationPoints>;
 constexpr int sidePanelLogicalWidth=13, contentEditorWidth=474, contentLeft=13,
@@ -231,9 +233,11 @@ constexpr RECT footerSettingsRect{contentLeft+31,controlsBottom,contentLeft+59,b
 constexpr RECT footerButtonRect(int i) {return {footerSettingsRect.right+1+i*footerButtonStride,controlsBottom,
  footerSettingsRect.right+1+i*footerButtonStride+footerButtonWidth,baseEditorHeight};}
 constexpr RECT footerActionsArea{footerSettingsRect.left,controlsBottom,contentLeft+126,baseEditorHeight};
-constexpr RECT syncRect{contentRight-58,0,contentRight,headerHeight};
-constexpr RECT triggerSelectorRect{contentRight-134,0,syncRect.left,headerHeight};
-constexpr RECT triggerMenuRect{contentRight-134,triggerMenuTop,contentRight,triggerMenuTop+4*triggerMenuRowHeight};
+// Match the compact INHA header controls: 62 px trigger, 47 px SYNC,
+// with only each control's own padding between its content and its neighbor.
+constexpr RECT syncRect{contentRight-47,0,contentRight,headerHeight};
+constexpr RECT triggerSelectorRect{syncRect.left-62,0,syncRect.left,headerHeight};
+constexpr RECT triggerMenuRect{triggerSelectorRect.left,triggerMenuTop,triggerSelectorRect.left+83,triggerMenuTop+4*triggerMenuRowHeight};
 constexpr RECT triggerMenuItemRect(int i){return {triggerMenuRect.left,triggerMenuTop+i*triggerMenuRowHeight,triggerMenuRect.right,triggerMenuTop+(i+1)*triggerMenuRowHeight};}
 constexpr RECT seedRefreshRect{triggerSelectorRect.left-29,0,triggerSelectorRect.left-5,headerHeight};
 constexpr RECT seedValueRect{seedRefreshRect.left-78,0,seedRefreshRect.left-1,headerHeight};
@@ -242,6 +246,10 @@ constexpr std::array<RECT,2> motionTabRects{{
  {contentLeft+8,174,contentLeft+120,196},
  {contentLeft+120,174,contentLeft+177,196}
 }};
+constexpr RECT bufferTripletToggleBounds{212+16,38,212+34,52};
+constexpr RECT bufferTripletToggleFace{212+20,40,212+30,51};
+constexpr RECT grainTripletToggleBounds{288+12,38,288+30,52};
+constexpr RECT grainTripletToggleFace{288+16,40,288+26,51};
 constexpr ParamID symmetricRangeDrag=parameterCount+1,translateRangeDrag=parameterCount+2,pendingRangeDrag=parameterCount+3;
 struct Control {ParamID minimum,maximum;int x,y;const wchar_t* label;bool slider;};
 constexpr std::array<Control,14> controls{{
@@ -509,15 +517,15 @@ public:
  tresult PLUGIN_API getParameterInfo(int32 index,ParameterInfo& info) override{
   if(index<0||index>=parameterCount)return kInvalidArgument;const auto& p=specs[index];std::memset(&info,0,sizeof(info));
   info.id=index;copyUtf16(info.title,p.title);copyUtf16(info.shortTitle,p.shortTitle);copyUtf16(info.units,p.unit);
-  info.stepCount=index==triggerMode?3:index==bypass||index==motionMode||index==tempoSync?1:index==mass?7:index==seedHigh||index==seedLow?65535:0;
+  info.stepCount=index==triggerMode?3:index==bypass||index==motionMode||index==tempoSync||index==bufferTriplets||index==grainTriplets?1:index==mass?7:index==seedHigh||index==seedLow?65535:0;
   info.defaultNormalizedValue=defaultStateNormalized(index);info.unitId=0;
-  info.flags=ParameterInfo::kCanAutomate|((index==triggerMode||index==motionMode||index==tempoSync)?ParameterInfo::kIsList:0)|(index==bypass?ParameterInfo::kIsBypass:0);return kResultOk;
+  info.flags=ParameterInfo::kCanAutomate|((index==triggerMode||index==motionMode||index==tempoSync||index==bufferTriplets||index==grainTriplets)?ParameterInfo::kIsList:0)|(index==bypass?ParameterInfo::kIsBypass:0);return kResultOk;
  }
  tresult PLUGIN_API getParamStringByValue(ParamID id,ParamValue normalized,String128 text) override{
   if(id>=parameterCount)return kInvalidArgument;const double p=toPlain(id,normalized);
   if(const char* name=choiceName(id,p)){copyUtf16(text,name);return kResultOk;}
   const auto value=id==seedHigh||id==seedLow?std::to_wstring(static_cast<unsigned>(std::lround(p))):
-   specs[id].time&&plain(tempoSync)>=0.5?std::wstring(InhaGrain::Timing::syncLabel(normalized)):displayValue(id,p);
+   specs[id].time&&plain(tempoSync)>=0.5?std::wstring(InhaGrain::Timing::syncLabel(normalized,tripletsFor(id))):displayValue(id,p);
   for(std::size_t i=0;i<128;++i)text[i]=i<value.size()?static_cast<char16>(value[i]):0;
   return kResultOk;
  }
@@ -525,11 +533,11 @@ public:
   if(id>=parameterCount||!text)return kInvalidArgument;
   char b[128]{};for(int i=0;i<127&&text[i];++i)b[i]=static_cast<char>(text[i]);
   if(id==triggerMode||id==motionMode)for(int m=0;m<(id==triggerMode?4:2);++m)if(_stricmp(b,choiceName(id,m))==0){normalized=toNormal(id,m);return kResultOk;}
-  if((id==bypass||id==tempoSync)&&(_stricmp(b,"ON")==0||_stricmp(b,"OFF")==0)){normalized=_stricmp(b,"ON")==0?1:0;return kResultOk;}
+  if((id==bypass||id==tempoSync||id==bufferTriplets||id==grainTriplets)&&(_stricmp(b,"ON")==0||_stricmp(b,"OFF")==0)){normalized=_stricmp(b,"ON")==0?1:0;return kResultOk;}
   if((id==dryLevel||id==wetLevel)&&_strnicmp(b,"-INF",4)==0){normalized=0;return kResultOk;}
   if(specs[id].time&&plain(tempoSync)>=0.5){
    std::wstring label;for(int i=0;text[i]&&i<127;++i)label.push_back(static_cast<wchar_t>(std::towupper(text[i])));
-   const auto note=InhaGrain::Timing::syncNormalizedFromLabel(label);
+   const auto note=InhaGrain::Timing::syncNormalizedFromLabel(label,tripletsFor(id));
    if(note>=0){normalized=note;return kResultOk;}
    if(label.find(L'/')!=std::wstring::npos)return kResultFalse;
   }
@@ -540,16 +548,16 @@ public:
  }
  ParamValue PLUGIN_API normalizedParamToPlain(ParamID id,ParamValue value) override{
   return id<parameterCount&&specs[id].time&&plain(tempoSync)>=0.5
-   ?InhaGrain::Timing::syncMilliseconds(value,tempoForView()):toPlain(id,value);
+   ?InhaGrain::Timing::syncMilliseconds(value,tempoForView(),tripletsFor(id)):toPlain(id,value);
  }
  ParamValue PLUGIN_API plainParamToNormalized(ParamID id,ParamValue value) override{
   if(id<parameterCount&&specs[id].time&&plain(tempoSync)>=0.5){
    std::size_t nearest=0;double distance=std::numeric_limits<double>::max();
-   for(std::size_t i=0;i<InhaGrain::Timing::beats.size();++i){
-    const auto d=std::abs(InhaGrain::Timing::syncMilliseconds(InhaGrain::Timing::syncNormalized(i),tempoForView())-value);
+   for(std::size_t i=0;i<InhaGrain::Timing::choiceCount(tripletsFor(id));++i){
+    const auto d=std::abs(InhaGrain::Timing::syncMilliseconds(InhaGrain::Timing::syncNormalized(i,tripletsFor(id)),tempoForView(),tripletsFor(id))-value);
     if(d<distance){nearest=i;distance=d;}
    }
-   return InhaGrain::Timing::syncNormalized(nearest);
+   return InhaGrain::Timing::syncNormalized(nearest,tripletsFor(id));
   }
   return toNormal(id,value);
  }
@@ -593,7 +601,7 @@ public:
             return;
         normalized = quantizeNormal (id, normalized);
         if (specs[id].time && plain(tempoSync)>=0.5)
-            normalized=InhaGrain::Timing::syncNormalized(InhaGrain::Timing::syncIndex(normalized));
+            normalized=InhaGrain::Timing::syncNormalized(InhaGrain::Timing::syncIndex(normalized,tripletsFor(id)),tripletsFor(id));
         values[id].store (normalized, std::memory_order_relaxed);
         localEditValues[id].store (normalized, std::memory_order_relaxed);
         localEditing[id].store (gesture <= 0, std::memory_order_release);
@@ -643,6 +651,10 @@ public:
     }
     [[nodiscard]] double plain (ParamID id) const { return toPlain (id, normalized (id)); }
     [[nodiscard]] double tempoForView() const { return hostTempo.load(std::memory_order_relaxed); }
+    [[nodiscard]] bool tripletsFor(ParamID id) const {
+        return id==scatter?plain(bufferTriplets)>=0.5:
+            (id==grainMinimum||id==grainMaximum)&&plain(grainTriplets)>=0.5;
+    }
     void toggleLevelFromView (ParamID id)
     {
         if (id != dryLevel && id != wetLevel)
@@ -732,10 +744,10 @@ public:
 private:
  tresult readState(IBStream* stream){
   if(!stream)return kInvalidArgument;SavedStateHeader h{};int32 bytes=0;
-  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||h.magic!=0x47524149u||(h.version!=1&&h.version!=2&&h.version!=3))return kResultFalse;
+  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||h.magic!=0x47524149u||(h.version!=1&&h.version!=2&&h.version!=3&&h.version!=4))return kResultFalse;
   std::array<double,parameterCount> p{};
   for(ParamID id=0;id<parameterCount;++id)p[id]=defaultStateNormalized(id);
-  const auto count=h.version==1?stateV1ParameterCount:h.version==2?stateV2ParameterCount:static_cast<std::size_t>(parameterCount);
+  const auto count=h.version==1?stateV1ParameterCount:h.version==2?stateV2ParameterCount:h.version==3?stateV3ParameterCount:static_cast<std::size_t>(parameterCount);
   const int32 size=static_cast<int32>(count*sizeof(double));
   if(stream->read(p.data(),size,&bytes)!=kResultOk||bytes!=size)return kResultFalse;
   if(h.version<3)for(ParamID id=0;id<count;++id)if(specs[id].time){
@@ -834,7 +846,10 @@ private:
  InhaGrain::Parameters makeSettings(const std::array<double,parameterCount>& p) const noexcept {
   const bool synced=toPlain(tempoSync,p[tempoSync])>=0.5;
   const auto bpm=hostTempo.load(std::memory_order_relaxed);
-  const auto v=[&](ParamID id){return synced&&specs[id].time?InhaGrain::Timing::syncMilliseconds(p[id],bpm):toPlain(id,p[id]);};InhaGrain::Parameters result;
+  const auto allowTriplets=[&](ParamID id){return id==scatter?toPlain(bufferTriplets,p[bufferTriplets])>=0.5:
+      (id==grainMinimum||id==grainMaximum)&&toPlain(grainTriplets,p[grainTriplets])>=0.5;};
+  const auto v=[&](ParamID id){return synced&&specs[id].time?InhaGrain::Timing::syncMilliseconds(p[id],bpm,allowTriplets(id)):toPlain(id,p[id]);};InhaGrain::Parameters result;
+  result.bufferTriplets=synced&&allowTriplets(scatter);result.grainTriplets=synced&&allowTriplets(grainMinimum);
   result.synced=synced;result.tempoBpm=static_cast<float>(bpm);
   result.durationMinimumMs=InhaGrain::Timing::minimumDuration(synced,bpm);
   result.durationMaximumMs=InhaGrain::Timing::maximumDuration(synced,bpm);
@@ -1499,6 +1514,7 @@ constexpr COLORREF disabledInk = static_cast<COLORREF> (Inha::Ui::Theme::disable
 constexpr COLORREF disabledFill = static_cast<COLORREF> (Inha::Ui::Theme::disabledFill.nativeColourRef());
 constexpr COLORREF activeGreen = static_cast<COLORREF> (Inha::Ui::Theme::activeGreen.nativeColourRef());
 constexpr COLORREF activeGlow = static_cast<COLORREF> (Inha::Ui::Theme::activeGlow.nativeColourRef());
+constexpr COLORREF tripletOutline = RGB (0xbc,0xb3,0x9b);
 // Retain the family palette for consistent light and dark appearance.
 constexpr COLORREF manualRegionColour = RGB (53, 50, 43);
 // The old grid colours composited at 25% over the panel background. This is
@@ -1571,6 +1587,14 @@ void fill (HDC dc, RECT rect, COLORREF colour, int verticalPixelOffset = 0)
     const auto brush = CreateSolidBrush (colour);
     FillRect (dc, &rect, brush);
     DeleteObject (brush);
+}
+
+void outlineRect(HDC dc,RECT rect,COLORREF colour)
+{
+    fill(dc,{rect.left,rect.top,rect.right,rect.top+1},colour);
+    fill(dc,{rect.left,rect.bottom-1,rect.right,rect.bottom},colour);
+    fill(dc,{rect.left,rect.top+1,rect.left+1,rect.bottom-1},colour);
+    fill(dc,{rect.right-1,rect.top+1,rect.right,rect.bottom-1},colour);
 }
 
 void fillRightTriangle (HDC dc, RECT rect, COLORREF colour)
@@ -1959,6 +1983,7 @@ HCURSOR NativeView::cursorFor(int x,int y) const {
  for(int i=0;i<2;++i)if((i==1||owner.plain(triggerMode)>=0.5)&&pointIn(motionTabRects[i],x,y))return hand;
  for(int i=0;footerExpanded&&i<2;++i)if(pointIn(footerButtonRect(i),x,y))return hand;
  if(triggerMenuOpen&&triggerMenuItemAt(x,y)>=0)return hand;
+ if(owner.plain(tempoSync)>=0.5&&(pointIn(bufferTripletToggleBounds,x,y)||pointIn(grainTripletToggleBounds,x,y)))return hand;
  for(const auto& c:controls)if(controlEnabled(c.minimum)&&(pointIn(knobFor(c.minimum),x,y)||pointIn(verticalValueFor(c.minimum),x,y)))return hand;
  return arrow;
 }
@@ -1982,8 +2007,22 @@ void NativeView::paint (HDC windowDC)
     (void) updateParameterDisplay();
     const auto& displayed = parameterDisplay.values();
     const bool synced=toPlain(tempoSync,displayed[tempoSync])>=0.5;
-    const auto normalized = [&] (ParamID id) { return synced&&specs[id].time?InhaGrain::Timing::syncNormalized(InhaGrain::Timing::syncIndex(displayed[id])):displayed[id]; };
+    const auto frameTempo=owner.tempoForView();
+    const auto allowTriplets=[&](ParamID id){return id==scatter?toPlain(bufferTriplets,displayed[bufferTriplets])>=0.5:
+        (id==grainMinimum||id==grainMaximum)&&toPlain(grainTriplets,displayed[grainTriplets])>=0.5;};
+    const auto normalized = [&] (ParamID id) { return synced&&specs[id].time?InhaGrain::Timing::syncNormalized(InhaGrain::Timing::syncIndex(displayed[id],allowTriplets(id)),allowTriplets(id)):displayed[id]; };
     const auto plain = [&] (ParamID id) { return toPlain (id, displayed[id]); };
+    const auto resolvedTime=[&](ParamID id){return synced?InhaGrain::Timing::syncMilliseconds(normalized(id),frameTempo,allowTriplets(id)):plain(id);};
+    const auto effectiveGrain=[&](ParamID id){
+        const auto capped=std::min(resolvedTime(id),resolvedTime(scatter));
+        if(!synced)return toNormal(id,capped);
+        const auto triplets=allowTriplets(id);
+        const auto floor=InhaGrain::Timing::floorMilliseconds(capped,frameTempo,triplets);
+        std::size_t index=0;
+        for(std::size_t i=1;i<InhaGrain::Timing::choiceCount(triplets);++i)
+            if(InhaGrain::Timing::syncMilliseconds(InhaGrain::Timing::syncNormalized(i,triplets),frameTempo,triplets)<=floor+1e-6)index=i;
+        return InhaGrain::Timing::syncNormalized(index,triplets);
+    };
     RECT client {};
     GetClientRect (window, &client);
     const auto width = std::max (1L, client.right - client.left);
@@ -2092,15 +2131,16 @@ void NativeView::paint (HDC windowDC)
     const auto mode=std::clamp(static_cast<int>(std::lround(plain(triggerMode))),0,3);
     constexpr std::array<const wchar_t*,4> shortModeNames{{L"NONE",L"TRNS",L"MIDI",L"VOL"}};
     const auto modeName=shortModeNames[mode];
-    const auto previousFont=SelectObject(dc,sectionFont);SIZE modeTextSize{};
+    const auto previousFont=SelectObject(dc,smallFont);SIZE modeTextSize{};
     GetTextExtentPoint32W(dc,modeName,static_cast<int>(std::wcslen(modeName)),&modeTextSize);SelectObject(dc,previousFont);
     const auto modeTextWidth=static_cast<int>(std::lround(modeTextSize.cx/renderScale));
     const auto groupWidth=19+modeTextWidth;const auto groupLeft=(triggerSelectorRect.left+triggerSelectorRect.right-groupWidth)/2;
     {Gdiplus::Graphics graphics(dc);inha::grainIcons::draw(graphics,inha::grainIcons::Icon::trigger,
       scaledReal(static_cast<float>(groupLeft)),scaledReal(7.0f),scaledReal(14.0f),smoothColour(ink));}
-    text(dc,sectionFont,ink,modeName,{groupLeft+19,0,groupLeft+groupWidth+1,headerHeight},DT_CENTER|DT_VCENTER,2);
-    trackedText(dc,sectionFont,synced?ink:muted,L"SYNC",syncRect,DT_CENTER,1);
-    if(synced)line(dc,syncRect.left+10,headerHeight-5,syncRect.right-10,headerHeight-5,ink);
+    text(dc,smallFont,ink,modeName,{groupLeft+19,1,groupLeft+groupWidth+1,headerHeight+1},DT_CENTER|DT_VCENTER);
+    if(synced)fill(dc,syncRect,rangeFill);
+    trackedText(dc,smallFont,ink,L"SYNC",
+                {syncRect.left,syncRect.top,syncRect.right-9,syncRect.bottom},DT_RIGHT,1);
     const auto undulationPanel=darkTheme?RGB(40,40,39):RGB(232,225,206);
     const auto duckPanel=darkTheme?RGB(35,35,34):RGB(226,219,200);
     const auto selectedMotion=mode==0||plain(motionMode)>=0.5?1:0;
@@ -2123,8 +2163,8 @@ void NativeView::paint (HDC windowDC)
       const auto a=std::min(normalized(lo),ranged?normalized(hi):normalized(lo));
       const auto b=std::max(normalized(lo),ranged?normalized(hi):normalized(lo));
       const bool grainRange=c.minimum==grainMinimum;
-      const auto effectiveA=grainRange?std::min(a,normalized(scatter)):a;
-      const auto effectiveB=grainRange?std::min(b,normalized(scatter)):b;
+      const auto effectiveA=grainRange?std::min(effectiveGrain(lo),effectiveGrain(hi)):a;
+      const auto effectiveB=grainRange?std::max(effectiveGrain(lo),effectiveGrain(hi)):b;
       const auto pink=darkTheme?RGB(255,108,168):RGB(220,48,116);
       const auto bg=c.minimum==undulationMinimum||c.minimum==speedMinimum?undulationPanel:
         c.minimum==duckDry||c.minimum==duckPrevious?duckPanel:panel;
@@ -2147,10 +2187,18 @@ void NativeView::paint (HDC windowDC)
        smoothLine(dc,c.x-7,yb,c.x+7,yb,primary,1.5f);
       }
       const int half=c.slider?22:39;
-      trackedText(dc,smallFont,enabled?muted:disabledInk,label,{c.x-half,c.y-53,c.x+half,c.y-39},DT_CENTER, c.slider?0:1);
+      const bool hasTripletToggle=c.minimum==scatter||c.minimum==grainMinimum;
+      trackedText(dc,smallFont,enabled?muted:disabledInk,label,{hasTripletToggle?c.x-42:c.x-half,c.y-53,hasTripletToggle?c.x+30:c.x+half,c.y-39},DT_CENTER, c.slider?0:1);
+      if(hasTripletToggle){
+       const auto active=plain(c.minimum==scatter?bufferTriplets:grainTriplets)>=0.5;
+       const bool toggleEnabled=synced&&enabled;
+       const auto face=c.minimum==scatter?bufferTripletToggleFace:grainTripletToggleFace;
+       if(active&&toggleEnabled)fill(dc,face,ink);else outlineRect(dc,face,tripletOutline);
+       trackedText(dc,smallFont,active&&toggleEnabled?panel:toggleEnabled?ink:disabledInk,L"T",face,DT_CENTER,0);
+      }
       const auto compact=[&](ParamID id){
-       const auto effective=grainRange?std::min(normalized(id),normalized(scatter)):normalized(id);
-       auto value=synced&&specs[id].time?std::wstring(InhaGrain::Timing::syncLabel(effective))
+       const auto effective=grainRange?effectiveGrain(id):normalized(id);
+       auto value=synced&&specs[id].time?std::wstring(InhaGrain::Timing::syncLabel(effective,allowTriplets(id)))
          :displayValue(id,grainRange?std::min(plain(id),plain(scatter)):plain(id));
        if(id==dryLevel||id==wetLevel){const auto space=value.find(L' ');if(space!=std::wstring::npos)value.resize(space);}
        if(c.slider&&specs[id].time&&!synced){
@@ -2168,9 +2216,9 @@ void NativeView::paint (HDC windowDC)
        return value;
       };
       const auto controlValueFont=c.slider&&specs[lo].time&&synced?syncedSliderValueFont:valueFont;
-      text(dc,controlValueFont,grainRange&&normalized(lo)>normalized(scatter)+1e-8?pink:primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
+      text(dc,controlValueFont,grainRange&&resolvedTime(lo)>resolvedTime(scatter)+1e-6?pink:primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
       const auto second=ranged?compact(hi):c.minimum==amount&&mode==2?std::wstring(L"/ NOTE"):(c.minimum==dryLevel||c.minimum==wetLevel)?std::wstring(L"dB"):std::wstring{};
-      text(dc,controlValueFont,grainRange&&normalized(hi)>normalized(scatter)+1e-8?pink:primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
+      text(dc,controlValueFont,grainRange&&resolvedTime(hi)>resolvedTime(scatter)+1e-6?pink:primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
     }
     trackedText (dc, footerFont, muted,
                  L"v" + std::wstring (InhaGrainVersion::wide) + L" \xa9 2026 O. Inha / inha.jp",
@@ -2239,7 +2287,7 @@ void NativeView::paint (HDC windowDC)
         {
             const auto row = triggerMenuItemRect (index);
             if (index == triggerMenuHover) fill (dc, row, menuHover, slide);
-            text (dc, sectionFont, panel, names[static_cast<std::size_t> (index)], row,
+            text (dc, smallFont, panel, names[static_cast<std::size_t> (index)], row,
                   DT_CENTER | DT_VCENTER, slide);
         }
         if (backdrop != nullptr)
@@ -2288,6 +2336,9 @@ void NativeView::mouseDown(int x,int y,bool rightButton){
  if(triggerMenuOpen||triggerMenuReveal>0){const auto index=triggerMenuOpen?triggerMenuItemAt(x,y):-1;if(!rightButton&&index>=0)owner.editFromView(triggerMode,toNormal(triggerMode,index),2);setTriggerMenuOpen(false,true);return;}
  if(seedEditing&&!pointIn(seedValueRect,x,y))commitSeed();
  if(rightButton)return;
+ if(pointIn(bufferTripletToggleBounds,x,y)||pointIn(grainTripletToggleBounds,x,y)){
+  if(owner.plain(tempoSync)>=0.5){const auto id=pointIn(bufferTripletToggleBounds,x,y)?bufferTriplets:grainTriplets;mouseUp();owner.editFromView(id,owner.plain(id)>=0.5?0:1,2);}return;
+ }
  if(pointIn(footerSettingsRect,x,y)){setFooterExpanded(true);return;}
  for(int i=0;footerExpanded&&i<2;++i)if(pointIn(footerButtonRect(i),x,y)){mouseUp();ReleaseCapture();if(i==0)toggleTheme();else toggleZoom();return;}
  if(pointIn(logoHitRect,x,y)){toggleZoom();return;}

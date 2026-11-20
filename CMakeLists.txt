@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(INHAGrain VERSION 0.3.1 LANGUAGES CXX)
+project(INHAGrain VERSION 0.3.2 LANGUAGES CXX)
 
 # Ship a self-contained Windows binary without a Visual C++ redistributable.
 if(MSVC)

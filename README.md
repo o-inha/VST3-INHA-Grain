@@ -1,7 +1,7 @@
 # INHA Grain
 
 Windows x64 VST3 insert effect for captured granular textures. Development
-version: **0.3.1**. Built on INHA Core 0.1.2 and the native INHA editor family.
+version: **0.3.2**. Built on INHA Core 0.1.2 and the native INHA editor family.
 
 ## Getting started
 
@@ -28,6 +28,7 @@ Two values under a control are the lower/upper bounds of a seeded random range.
 | GRAIN | Requested grain-duration range; effective durations cannot exceed BUFFER or the source audio already captured |
 | PAN | Seeded per-grain stereo balance range, −100 (left) to +100 (right); 0 preserves the original stereo balance |
 | SYNC | Tempo-synced BUFFER, GRAIN, A, R and SWAY SPEED, from 1/16 note to two 4/4 bars |
+| T beside BUFFER / GRAIN | Independently include triplet divisions alongside straight values in that control's synced pool; disabled in free time while retaining each toggle setting |
 | ENV | Grain-window range: 0% triangle, 50% sine, 100% rounded square |
 | UNDULATION / SWAY tabs | Select event-shaped movement or continuous smooth random movement; each tab retains independent AMOUNT/SPEED settings |
 | UNDULATION AMOUNT | Signed grain-size movement: negative toward the selected GRAIN minimum, positive toward the current duration upper limit, zero steady; BUFFER caps the effective size |
@@ -48,6 +49,12 @@ Free-time duration controls span **40 ms–6 seconds** (two 4/4 bars at 80 BPM).
 Times above 999 ms use seconds, e.g. `1.00 S`. SYNC uses standard note labels
 `1/16`, `1/8`, `1/4`, `1/2`, `1 BAR` and `2 BARS`. Tempo follows the host
 within 20–999 BPM; the last valid tempo is retained if the host omits it (initially 120 BPM).
+The separate **T** buttons beside BUFFER and GRAIN add triplet choices such as
+`1/8T`, `1/4T` and `1/2T` to that control's value pool. They use the compact
+outlined/filled INHA Stutter style and are available while SYNC is enabled.
+Both default off; their settings are saved and automatable. Turning T off
+retains the requested position and resolves triplet positions to straight
+values; turning it back on restores those triplet positions.
 UNDULATION SPEED remains a percentage of A + R.
 
 GRAIN handles retain the requested values above BUFFER. The white range arc
@@ -120,6 +127,16 @@ start/history. Audio captures and detector histories are live DSP state: seeking
 into the middle of a recording cannot reconstruct audio the plug-in has never
 received. Discontinuous transport and playback restarts reset that history. Use the same preroll for
 identical renders. Refreshing SEED intentionally changes the result.
+
+## Changes in 0.3.2
+
+- SYNC uses a background highlight with a constant text color and no underline.
+- Compact adjacent TRIGGER/SYNC buttons align to the header's right edge.
+- The trigger dropdown uses the compact width and padding from INHA Stutter.
+- Independent T buttons beside BUFFER and GRAIN add triplet divisions to each
+  synced value pool, with Stutter's visual styling and label spacing.
+- State v4 preserves existing v1/v2/v3 projects, with both T buttons off for
+  older states.
 
 ## Changes in 0.3.1
 

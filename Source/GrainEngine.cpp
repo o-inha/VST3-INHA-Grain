@@ -374,7 +374,7 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
     size = std::clamp (size, static_cast<double> (parameters_.durationMinimumMs),
                             static_cast<double> (parameters_.durationMaximumMs));
     if (parameters_.synced)
-        size = Timing::quantizeMilliseconds (size, parameters_.tempoBpm);
+        size = Timing::quantizeMilliseconds (size, parameters_.tempoBpm, parameters_.grainTriplets);
     auto duration = static_cast<std::uint32_t> (std::min (samplesForMs (size), available));
     auto& previous = event.previousGrain[stream];
     if (previous != 0)
@@ -386,7 +386,7 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
         // after the transition slew so raising the handle cannot launch new
         // grains below that setting once enough source has been captured.
         const auto floorMs = parameters_.synced
-            ? Timing::quantizeMilliseconds (minimum, parameters_.tempoBpm) : minimum;
+            ? Timing::quantizeMilliseconds (minimum, parameters_.tempoBpm, parameters_.grainTriplets) : minimum;
         const auto floor = std::min (available, samplesForMs (floorMs));
         duration = std::max (duration, static_cast<std::uint32_t> (floor));
     }
@@ -395,10 +395,11 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
         // Compare integer frames, so rounding a beat to the sample grid cannot
         // accidentally floor an exact note duration to the preceding note.
         std::uint32_t snapped = static_cast<std::uint32_t> (minimumCapture);
-        for (std::size_t step = 0; step < Timing::beats.size(); ++step)
+        for (std::size_t step = 0; step < Timing::choiceCount (parameters_.grainTriplets); ++step)
         {
             const auto frames = samplesForMs (Timing::syncMilliseconds (
-                Timing::syncNormalized (step), parameters_.tempoBpm));
+                Timing::syncNormalized (step, parameters_.grainTriplets), parameters_.tempoBpm,
+                parameters_.grainTriplets));
             if (frames <= duration)
                 snapped = static_cast<std::uint32_t> (frames);
         }

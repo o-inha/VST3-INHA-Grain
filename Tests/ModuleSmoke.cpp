@@ -151,7 +151,7 @@ public:
         require(component->initialize(nullptr)==kResultOk,"Component initialize failed");
         require(component->queryInterface(IAudioProcessor_iid,reinterpret_cast<void**>(&audio))==kResultOk&&audio,"Audio processor interface missing");
         require(component->queryInterface(IEditController_iid,reinterpret_cast<void**>(&controller))==kResultOk&&controller,"Controller interface missing");
-        require(controller->getParameterCount()==33,"Parameter inventory changed unexpectedly");
+        require(controller->getParameterCount()==35,"Parameter inventory changed unexpectedly");
         require(audio->canProcessSampleSize(kSample32)==kResultTrue&&audio->canProcessSampleSize(kSample64)==kResultTrue,"Both sample formats required");
         IProcessContextRequirements* contextRequirements=nullptr;
         require(component->queryInterface(IProcessContextRequirements_iid,reinterpret_cast<void**>(&contextRequirements))==kResultOk&&contextRequirements,"VST3 process context requirements interface missing");
@@ -207,7 +207,7 @@ void replaceStateValue(MemoryStream& state,ParamID id,double value)
 void stateCompatibility(Module& module)
 {
     Instance instance(module);
-    ParameterInfo motionInfo{},syncInfo{},massInfo{};
+    ParameterInfo motionInfo{},syncInfo{},massInfo{},tripletInfo{};
     require(instance.controller->getParameterInfo(24,motionInfo)==kResultOk&&motionInfo.id==24
             &&motionInfo.stepCount==1&&(motionInfo.flags&ParameterInfo::kIsList)!=0
             &&(motionInfo.flags&ParameterInfo::kCanAutomate)!=0,
@@ -217,29 +217,33 @@ void stateCompatibility(Module& module)
             "SYNC must be an appended automatable switch");
     require(instance.controller->getParameterInfo(30,massInfo)==kResultOk&&massInfo.id==30
             &&massInfo.stepCount==7,"MASS must expose eight integer voice counts");
+    for(const ParamID id:{33u,34u})
+        require(instance.controller->getParameterInfo(id,tripletInfo)==kResultOk&&tripletInfo.id==id
+                &&tripletInfo.stepCount==1&&(tripletInfo.flags&ParameterInfo::kCanAutomate)!=0,
+                "Triplet toggles must be appended automatable switches");
     String128 motionText{};
     require(instance.controller->getParamStringByValue(24,1.0,motionText)==kResultOk,
             "Could not format SWAY mode for host");
     const std::array<char16,5> expectedSway{{'S','W','A','Y',0}};
     require(std::equal(expectedSway.begin(),expectedSway.end(),motionText),"Host motion list does not label SWAY correctly");
     MemoryStream saved;
-    require(instance.component->getState(&saved)==kResultOk,"Could not save initial v3 state");
-    require(saved.bytes.size()==8+33*sizeof(double)&&stateWord(saved,0)==0x47524149u&&stateWord(saved,4)==3,
-            "Expected v3 state with 33 parameter values");
+    require(instance.component->getState(&saved)==kResultOk,"Could not save initial v4 state");
+    require(saved.bytes.size()==8+35*sizeof(double)&&stateWord(saved,0)==0x47524149u&&stateWord(saved,4)==4,
+            "Expected v4 state with 35 parameter values");
     const auto setPlain=[&](ParamID id,double plain){replaceStateValue(saved,id,instance.normalized(id,plain));};
     // Independent motion banks and new controls must survive a full project save.
     setPlain(4,500);setPlain(5,2000);setPlain(6,4000); // Preserve requests exceeding BUFFER.
     setPlain(9,-35);setPlain(10,45);setPlain(11,75);setPlain(12,180);
     setPlain(24,1);setPlain(25,17);setPlain(26,63);setPlain(27,250);setPlain(28,3500);
-    setPlain(29,1);setPlain(30,6);setPlain(31,-70);setPlain(32,85);
+    setPlain(29,1);setPlain(30,6);setPlain(31,-70);setPlain(32,85);setPlain(33,1);setPlain(34,1);
     saved.position=0;
-    require(instance.component->setState(&saved)==kResultOk,"Could not restore v3 state");
+    require(instance.component->setState(&saved)==kResultOk,"Could not restore v4 state");
     MemoryStream restored;
     require(instance.component->getState(&restored)==kResultOk&&saved.bytes==restored.bytes,
-            "v3 state round trip lost requested ranges or new controls");
+            "v4 state round trip lost requested ranges or new controls");
     saved.position=0;
-    require(instance.controller->setComponentState(&saved)==kResultOk,"Controller rejected v3 state");
-    for(ParamID id:{4u,5u,6u,9u,10u,11u,12u,24u,25u,26u,27u,28u,29u,30u,31u,32u})
+    require(instance.controller->setComponentState(&saved)==kResultOk,"Controller rejected v4 state");
+    for(ParamID id:{4u,5u,6u,9u,10u,11u,12u,24u,25u,26u,27u,28u,29u,30u,31u,32u,33u,34u})
         require(instance.controller->getParamNormalized(id)==stateValue(saved,id),"Controller lost an independent parameter");
 
     // Construct actual old encodings, rather than relabelling current normalized values.
@@ -260,8 +264,8 @@ void stateCompatibility(Module& module)
         if(version==2){replaceStateValue(legacy,27,oldTime(250,25,20000));replaceStateValue(legacy,28,oldTime(3500,25,20000));}
         require(instance.component->setState(&legacy)==kResultOk,"Existing project version is not compatible");
         migrated.bytes.clear();migrated.position=0;
-        require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==3,
-                "Legacy project did not migrate to v3 state");
+        require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==4,
+                "Legacy project did not migrate to v4 state");
         for(const auto expected:std::array<std::pair<ParamID,double>,7>{{{4,2000},{5,40},{6,1200},{13,500},{14,1000},{15,800},{16,6000}}})
             require(std::abs(stateValue(migrated,expected.first)-instance.normalized(expected.first,expected.second))<1e-10,
                     "Migration did not preserve and clip old milliseconds");
@@ -283,8 +287,21 @@ void stateCompatibility(Module& module)
         require(stateValue(migrated,29)==instance.normalized(29,0)
                 &&stateValue(migrated,30)==instance.normalized(30,1)
                 &&stateValue(migrated,31)==instance.normalized(31,0)
-                &&stateValue(migrated,32)==instance.normalized(32,0),"Legacy project did not initialize new controls safely");
+                &&stateValue(migrated,32)==instance.normalized(32,0)
+                &&stateValue(migrated,33)==0.0&&stateValue(migrated,34)==0.0,"Legacy project did not initialize new controls safely");
     }
+    // v3 already uses the current time encoding and retains all 33 old lanes.
+    MemoryStream v3;
+    v3.bytes=saved.bytes;v3.bytes.resize(8+33*sizeof(double));replaceStateWord(v3,4,3);
+    require(instance.component->setState(&v3)==kResultOk,"Existing v3 projects are not compatible");
+    migrated.bytes.clear();migrated.position=0;
+    require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==4,
+            "v3 project did not migrate to v4 state");
+    for(ParamID id=0;id<33;++id)
+        require(stateValue(migrated,id)==stateValue(v3,id),"v3 migration changed an existing parameter");
+    require(stateValue(migrated,33)==0.0&&stateValue(migrated,34)==0.0,
+            "v3 project did not default both triplet switches off");
+
     const auto rejected=[&](MemoryStream& invalid,const char* message)
     {
         invalid.position=0;
@@ -295,10 +312,10 @@ void stateCompatibility(Module& module)
     };
     MemoryStream invalid;invalid.bytes=saved.bytes;replaceStateWord(invalid,0,0);rejected(invalid,"Invalid state magic accepted");
     invalid.bytes=saved.bytes;replaceStateWord(invalid,4,99);rejected(invalid,"Unknown future state version accepted");
-    invalid.bytes=saved.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated v3 parameter payload accepted");
+    invalid.bytes=saved.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated v4 parameter payload accepted");
     invalid.bytes.assign(4,0);rejected(invalid,"Truncated state header accepted");
     require(instance.component->setState(nullptr)!=kResultOk,"Null state stream accepted");
-    std::cout<<"v1/v2 millisecond migration, v3 state, new controls and invalid-state rejection passed\n";
+    std::cout<<"v1/v2 millisecond migration, v3 compatibility, v4 state, new controls and invalid-state rejection passed\n";
 }
 
 template<typename Sample> void formatSmoke(Module& module,int channels,int symbolic) {
@@ -454,6 +471,48 @@ void syncAndPanHost(Module& module)
     std::cout<<"Host tempo sync at 30/80/120 BPM, note labels, and hard-right grain pan passed\n";
 }
 
+void tripletChoicesHost(Module& module)
+{
+    Instance instance(module);
+    const auto set=[&](ParamID id,double normalized)
+    {
+        require(instance.controller->setParamNormalized(id,normalized)==kResultOk,"Cannot configure host triplet switch");
+    };
+    const auto parse=[&](ParamID id,const char* label,double& normalized)
+    {
+        String128 text{};for(std::size_t i=0;label[i]&&i<127;++i)text[i]=static_cast<char16>(label[i]);
+        return instance.controller->getParamValueByString(id,text,normalized);
+    };
+    const auto formatted=[&](ParamID id,double normalized)
+    {
+        String128 text{};require(instance.controller->getParamStringByValue(id,normalized,text)==kResultOk,
+                                "Cannot format musical duration for host");
+        std::string result;for(const auto c:text){if(!c)break;result.push_back(static_cast<char>(c));}return result;
+    };
+    set(29,1);set(33,1);set(34,0);
+    double value=0;
+    require(parse(4,"1/8T",value)==kResultOk&&std::abs(value-0.1)<1e-12,
+            "BUFFER triplet switch did not enable triplet host input");
+    require(formatted(4,0.1)=="1/8T"&&formatted(5,0.1)=="1/8",
+            "BUFFER triplet switch changed GRAIN's independent choices");
+    require(parse(5,"1/8T",value)!=kResultOk,"GRAIN accepted a triplet while its own T switch was disabled");
+    set(33,0);set(34,1);
+    require(parse(4,"1/8T",value)!=kResultOk&&parse(5,"1/8T",value)==kResultOk,
+            "BUFFER/GRAIN triplet switch pools were not independent");
+    require(formatted(4,0.1)=="1/8"&&formatted(5,0.1)=="1/8T",
+            "GRAIN triplet host labels did not use the selected choice pool");
+    require(std::abs(instance.controller->normalizedParamToPlain(4,0.1)-250.0)<1e-5
+            &&std::abs(instance.controller->normalizedParamToPlain(5,0.1)-500.0/3.0)<1e-5,
+            "Triplet and straight choices did not convert independently to milliseconds");
+    require(parse(13,"1/8T",value)!=kResultOk&&formatted(13,0.1)=="1/8",
+            "GRAIN's T switch unexpectedly changed the event attack choices");
+    set(29,0);
+    require(instance.controller->getParamNormalized(34)==1.0,"Disabling SYNC discarded a stored T setting");
+    set(29,1);
+    require(formatted(5,0.1)=="1/8T","Re-enabling SYNC lost the selected GRAIN triplet pool");
+    std::cout<<"Independent BUFFER/GRAIN triplet parsing, labels, durations and retained settings passed\n";
+}
+
 void fixtureOffsets(Module& module) {
     const auto silent=renderFixture(module,-1),note=renderFixture(module,128),repeated=renderFixture(module,128);
     for(int i=0;i<128;++i)require(std::abs(note[i]-silent[i])<1e-7f,"MIDI note affected audio before its sample offset");
@@ -486,7 +545,7 @@ int wmain(int argc,wchar_t** argv) {
     try{
         require(argc==3,"Usage: GrainModuleSmoke <production-vst3-binary> <fixture-binary>");
         {Module production(argv[1]);formatSmoke<float>(production,1,kSample32);formatSmoke<float>(production,2,kSample32);formatSmoke<double>(production,1,kSample64);formatSmoke<double>(production,2,kSample64);}
-        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);transportRestartRepeatability(fixture);syncAndPanHost(fixture);}
+        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);transportRestartRepeatability(fixture);syncAndPanHost(fixture);tripletChoicesHost(fixture);}
         std::cout<<"Grain Windows module smoke passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

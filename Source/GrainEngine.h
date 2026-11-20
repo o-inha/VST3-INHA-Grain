@@ -20,6 +20,7 @@ struct Parameters
     // The adapter expands these bounds for tempo-synchronized durations.
     float durationMinimumMs = 40.0f, durationMaximumMs = 6000.0f;
     bool synced = false;
+    bool bufferTriplets = false, grainTriplets = false;
     float tempoBpm = 120.0f;
     float envMinPercent = 0.0f, envMaxPercent = 50.0f;
     float undulationMinPercent = 0.0f, undulationMaxPercent = 50.0f;
