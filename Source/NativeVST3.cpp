@@ -1938,7 +1938,14 @@ RECT NativeView::verticalLabelFor(ParamID id) const {
 }
 RECT NativeView::verticalValueFor(ParamID id) const {
  const auto r=knobFor(id);const LONG x=(r.left+r.right)/2,y=(r.top+r.bottom)/2;
- return {x-23,y+39,x+23,y+63};
+ RECT result{x-23,y+39,x+23,y+63};
+ // Narrow neighboring value hit areas at their midpoint, so densely spaced
+ // sliders never claim a click belonging to the adjacent value.
+ for(const auto& c:controls)if(c.y==y){
+  if(c.x<x)result.left=std::max(result.left,static_cast<LONG>((c.x+x)/2));
+  else if(c.x>x)result.right=std::min(result.right,static_cast<LONG>((c.x+x)/2));
+ }
+ return result;
 }
 bool NativeView::pointIn(RECT r,int x,int y) const {return r.right>r.left&&r.bottom>r.top&&x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 double NativeView::knobValue(RECT r,int x,int y) const {
