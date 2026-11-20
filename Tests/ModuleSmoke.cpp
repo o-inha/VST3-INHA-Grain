@@ -153,6 +153,10 @@ public:
         require(component->queryInterface(IEditController_iid,reinterpret_cast<void**>(&controller))==kResultOk&&controller,"Controller interface missing");
         require(controller->getParameterCount()==24,"Parameter inventory changed unexpectedly");
         require(audio->canProcessSampleSize(kSample32)==kResultTrue&&audio->canProcessSampleSize(kSample64)==kResultTrue,"Both sample formats required");
+        IProcessContextRequirements* contextRequirements=nullptr;
+        require(component->queryInterface(IProcessContextRequirements_iid,reinterpret_cast<void**>(&contextRequirements))==kResultOk&&contextRequirements,"VST3 process context requirements interface missing");
+        require((contextRequirements->getProcessContextRequirements()&IProcessContextRequirements::kNeedTransportState)!=0,"Transport state requirement missing");
+        contextRequirements->release();
         require(component->getBusCount(kAudio,kInput)==1&&component->getBusCount(kAudio,kOutput)==1,"Expected one input/output audio bus");
         require(component->getBusCount(kEvent,kInput)==1,"MIDI event input missing");
     }

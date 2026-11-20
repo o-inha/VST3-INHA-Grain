@@ -343,7 +343,8 @@ private:
     std::uint32_t lastDisplayRevision = 0;
 };
 
-class PluginInstance final : public IComponent, public IAudioProcessor, public IEditController {
+class PluginInstance final : public IComponent, public IAudioProcessor, public IEditController,
+                             public IProcessContextRequirements {
 public:
  PluginInstance() {
   std::array<double,parameterCount> initial{};
@@ -358,6 +359,7 @@ public:
   if(!object) return kInvalidArgument; *object=nullptr;
   if(iidEqual(iid,FUnknown_iid)||iidEqual(iid,IPluginBase_iid)||iidEqual(iid,IComponent_iid)) *object=static_cast<IComponent*>(this);
   else if(iidEqual(iid,IAudioProcessor_iid)) *object=static_cast<IAudioProcessor*>(this);
+  else if(iidEqual(iid,IProcessContextRequirements_iid)) *object=static_cast<IProcessContextRequirements*>(this);
   else if(iidEqual(iid,IEditController_iid)) *object=static_cast<IEditController*>(this);
   else return kNoInterface;
   addRef();return kResultOk;
@@ -396,6 +398,7 @@ public:
  }
  tresult PLUGIN_API canProcessSampleSize(int32 size) override{return size==kSample32||size==kSample64?kResultTrue:kResultFalse;}
  uint32 PLUGIN_API getLatencySamples() override{return 0;}
+ uint32 PLUGIN_API getProcessContextRequirements() override{return IProcessContextRequirements::kNeedTransportState;}
  tresult PLUGIN_API setupProcessing(ProcessSetup& setup) override{
   if((setup.symbolicSampleSize!=kSample32&&setup.symbolicSampleSize!=kSample64)||!std::isfinite(setup.sampleRate)||setup.sampleRate<8000||setup.sampleRate>384000)return kResultFalse;
   sampleRate=setup.sampleRate;
@@ -429,6 +432,7 @@ public:
   int eventIndex=0;const int eventCount=data.inputEvents?data.inputEvents->getEventCount():0;
   Event nextEvent{};bool haveEvent=eventCount>0&&data.inputEvents->getEvent(0,nextEvent)==kResultOk;
   const bool denied=license.denied();
+  uint64 silentChannels=(uint64{1}<<channels)-1;
   for(std::size_t boundary=0;boundary+1<count;++boundary){
    const int start=boundaries[boundary],end=boundaries[boundary+1];if(end<=start)continue;
    auto current=automationValuesAt(start),last=automationValuesAt(end);
@@ -455,13 +459,14 @@ public:
       if(bypassMix>=1.0f)result=raw[c];
       else if(bypassMix>0&&std::isfinite(source[c]))result+=(raw[c]-static_cast<double>(source[c]))*bypassMix;
      }
-     if(!std::isfinite(raw[c]))result=0.0;
+     if(!std::isfinite(result))result=0.0;
+     if(result!=0.0)silentChannels&=~(uint64{1}<<c);
      if(data.symbolicSampleSize==kSample32)output.channelBuffers32[c][i]=static_cast<float>(result);
      else output.channelBuffers64[c][i]=result;
     }
    }
   }
-  finishAutomationBlock(data.numSamples);grainActive.store(!denied&&engine.isActive());output.silenceFlags=0;return kResultOk;
+  finishAutomationBlock(data.numSamples);grainActive.store(!denied&&engine.isActive());output.silenceFlags=silentChannels;return kResultOk;
  }
  uint32 PLUGIN_API getTailSamples() override{return static_cast<uint32>(std::min(sampleRate*40.0,4294967294.0));}
  tresult PLUGIN_API setComponentState(IBStream* state) override{return readState(state);}
