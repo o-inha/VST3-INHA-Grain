@@ -1,0 +1,10 @@
+/build*/
+/release/
+/Dependencies/VST3_SDK/
+*.key
+*.zip
+*.wav
+*.exe
+*.dll
+*.o
+__pycache__/

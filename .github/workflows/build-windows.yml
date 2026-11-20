@@ -1,0 +1,50 @@
+name: Build Windows x64 VST3
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: grain-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch Steinberg VST3 SDK
+        shell: pwsh
+        run: git clone --branch v3.7.14_build_55 --depth 1 --recurse-submodules --shallow-submodules https://github.com/steinbergmedia/vst3sdk.git Dependencies/VST3_SDK
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DINHA_PLUGIN_BUILD_VST3=ON -DINHA_PLUGIN_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Upload editor previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Grain-editor-previews
+          path: build/editor-previews/*.png
+          if-no-files-found: ignore
+      - name: Verify release contents
+        shell: pwsh
+        run: |
+          if (Get-ChildItem build/dist -Recurse -File | Where-Object { $_.Name -match 'Fixture|licen[cs]e\.key|licence\.key' }) { throw "Unexpected fixture or key in release" }
+          $bytes = [IO.File]::ReadAllBytes("build/dist/INHA Grain.vst3/Contents/x86_64-win/INHA Grain.vst3")
+          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+          foreach ($id in @('inha-grain', 'INHA-Grain-device-v1:', '0.1.0')) { if (-not $ascii.Contains($id)) { throw "Missing Grain identity: $id" } }
+      - name: Assemble package
+        id: package
+        shell: pwsh
+        run: ./Dependencies/INHA-Core/scripts/PackageWindowsVST3.ps1 -PluginName "INHA Grain"
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.stage_path }}
+          if-no-files-found: error

@@ -1,0 +1,85 @@
+cmake_minimum_required(VERSION 3.22)
+project(INHAGrain VERSION 0.1.0 LANGUAGES CXX)
+
+set(INHA_CORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(Dependencies/INHA-Core)
+include(Dependencies/INHA-Core/cmake/InhaPlugin.cmake)
+option(INHA_PLUGIN_BUILD_VST3 "Build Windows x64 VST3" ${WIN32})
+option(INHA_PLUGIN_BUILD_TESTS "Build Grain DSP and module tests" ON)
+
+add_library(GrainEngine STATIC Source/GrainEngine.cpp)
+target_include_directories(GrainEngine PUBLIC Source)
+target_compile_features(GrainEngine PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(GrainEngine PRIVATE /W4 /permissive- /EHsc /utf-8)
+else()
+    target_compile_options(GrainEngine PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(INHA_PLUGIN_BUILD_VST3)
+    if(NOT WIN32)
+        message(FATAL_ERROR "The native INHA editor targets Windows.")
+    endif()
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Dependencies/VST3_SDK/pluginterfaces/base/ipluginbase.h")
+        message(FATAL_ERROR "Fetch Steinberg VST3 SDK v3.7.14_build_55 with submodules into Dependencies/VST3_SDK.")
+    endif()
+    set(GRAIN_PLUGIN_SOURCES Source/NativeVST3.cpp Source/GrainPreferences.cpp)
+    add_library(INHA_Grain_VST3 MODULE ${GRAIN_PLUGIN_SOURCES})
+    target_compile_features(INHA_Grain_VST3 PRIVATE cxx_std_17)
+    target_include_directories(INHA_Grain_VST3 PRIVATE Source Dependencies/VST3_SDK)
+    inha_attach_core(INHA_Grain_VST3)
+    target_link_libraries(INHA_Grain_VST3 PRIVATE GrainEngine
+        gdi32 gdiplus msimg32 user32 kernel32 ole32 uuid shell32 comctl32 advapi32)
+    target_compile_definitions(INHA_Grain_VST3 PRIVATE
+        WINVER=0x0A00 _WIN32_WINNT=0x0A00 UNICODE _UNICODE)
+    if(MSVC)
+        target_compile_options(INHA_Grain_VST3 PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    set_target_properties(INHA_Grain_VST3 PROPERTIES PREFIX "" SUFFIX ".vst3" OUTPUT_NAME "INHA Grain")
+    set(VST3_BUNDLE "${CMAKE_BINARY_DIR}/dist/INHA Grain.vst3")
+    add_custom_command(TARGET INHA_Grain_VST3 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${VST3_BUNDLE}/Contents/x86_64-win" "${VST3_BUNDLE}/Contents/Resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:INHA_Grain_VST3>" "${VST3_BUNDLE}/Contents/x86_64-win/INHA Grain.vst3"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Resources" "${VST3_BUNDLE}/Contents/Resources"
+        COMMENT "Assembling INHA Grain Windows x64 VST3 bundle")
+endif()
+
+if(INHA_PLUGIN_BUILD_TESTS)
+    enable_testing()
+    add_executable(GrainEngineTests Tests/GrainEngineTests.cpp)
+    target_link_libraries(GrainEngineTests PRIVATE GrainEngine)
+    target_compile_features(GrainEngineTests PRIVATE cxx_std_17)
+    add_test(NAME GrainEngineTests COMMAND GrainEngineTests)
+    if(WIN32 AND INHA_PLUGIN_BUILD_VST3)
+        add_library(GrainEditorFixture MODULE ${GRAIN_PLUGIN_SOURCES} Tests/EditorTestLicense.cpp)
+        target_compile_features(GrainEditorFixture PRIVATE cxx_std_17)
+        target_include_directories(GrainEditorFixture PRIVATE Source Dependencies/VST3_SDK)
+        target_compile_definitions(GrainEditorFixture PRIVATE INHA_EDITOR_TEST_FIXTURE=1
+            WINVER=0x0A00 _WIN32_WINNT=0x0A00 UNICODE _UNICODE)
+        target_link_libraries(GrainEditorFixture PRIVATE GrainEngine INHA::Core
+            gdi32 gdiplus msimg32 user32 kernel32 ole32 uuid shell32 comctl32 advapi32)
+        set_target_properties(GrainEditorFixture PROPERTIES PREFIX "" OUTPUT_NAME "GrainEditorFixture"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/editor-fixture/Contents/x86_64-win/$<0:>"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/editor-fixture/Contents/x86_64-win/$<0:>")
+        add_custom_command(TARGET GrainEditorFixture POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Resources"
+                "${CMAKE_BINARY_DIR}/editor-fixture/Contents/Resources")
+        if(MSVC)
+            target_compile_options(GrainEditorFixture PRIVATE /W4 /permissive- /EHsc /utf-8)
+        endif()
+        add_dependencies(GrainEditorFixture INHA_Grain_VST3)
+        foreach(test IN ITEMS ModuleSmoke EditorSmoke)
+            add_executable(Grain${test} Tests/${test}.cpp)
+            target_compile_features(Grain${test} PRIVATE cxx_std_17)
+            target_include_directories(Grain${test} PRIVATE Source Dependencies/VST3_SDK)
+            target_compile_definitions(Grain${test} PRIVATE WINVER=0x0A00 _WIN32_WINNT=0x0A00 UNICODE _UNICODE)
+            target_link_libraries(Grain${test} PRIVATE gdi32 gdiplus user32 ole32 uuid shell32 comctl32)
+            if(MSVC)
+                target_compile_options(Grain${test} PRIVATE /W4 /permissive- /EHsc /utf-8)
+            endif()
+            add_dependencies(Grain${test} GrainEditorFixture)
+        endforeach()
+        add_test(NAME GrainModuleSmoke COMMAND GrainModuleSmoke "$<TARGET_FILE:INHA_Grain_VST3>" "$<TARGET_FILE:GrainEditorFixture>")
+        add_test(NAME GrainEditorSmoke COMMAND GrainEditorSmoke "$<TARGET_FILE:GrainEditorFixture>" "${CMAKE_BINARY_DIR}/editor-previews")
+    endif()
+endif()
