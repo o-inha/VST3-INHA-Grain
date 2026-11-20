@@ -2004,6 +2004,7 @@ void NativeView::paint (HDC windowDC)
     const auto lineColour = palette.lineColour;
     const auto rangeFill = palette.rangeFill;
     const auto disabledInk = palette.disabledInk;
+    const auto tripletOutline = darkTheme ? lineColour : Drawing::tripletOutline;
     (void) updateParameterDisplay();
     const auto& displayed = parameterDisplay.values();
     const bool synced=toPlain(tempoSync,displayed[tempoSync])>=0.5;
