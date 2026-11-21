@@ -1,14 +1,14 @@
-#include "GrainPreferences.h"
+#include "GratePreferences.h"
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <iterator>
 
-namespace GrainPreferences
+namespace GratePreferences
 {
 namespace
 {
-constexpr wchar_t productKey[] = L"Software\\INHA\\Grain";
+constexpr wchar_t productKey[] = L"Software\\INHA\\Grate";
 
 bool readBool (const wchar_t* name, bool fallback)
 {
@@ -41,7 +41,7 @@ bool writeBool (const wchar_t* name, bool enabled, std::wstring& error)
     FormatMessageW (FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
         nullptr, static_cast<DWORD> (result), 0, message,
         static_cast<DWORD> (std::size (message)), nullptr);
-    error = L"The Grain preferences could not be saved for this Windows user.";
+    error = L"The Grate preferences could not be saved for this Windows user.";
     if (message[0] != L'\0') error += std::wstring (L"\n\n") + message;
     return false;
 }

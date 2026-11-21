@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: grain-${{ github.ref }}
+  group: grate-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   build:
@@ -33,41 +33,46 @@ jobs:
         run: |
           $validator = Get-ChildItem build-validator -Recurse -Filter validator.exe | Select-Object -First 1
           if (-not $validator) { throw "Steinberg validator executable missing" }
-          & $validator.FullName "build/dist/INHA Grain.vst3"
+          & $validator.FullName "build/dist/INHA Grate.vst3"
           if ($LASTEXITCODE -ne 0) { throw "Production VST3 validation failed" }
       - name: Upload editor previews
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Grain-editor-previews
+          name: Grate-editor-previews
           path: build/editor-previews/*.png
           if-no-files-found: ignore
       - name: Verify release contents
         shell: pwsh
         run: |
           if (Get-ChildItem build/dist -Recurse -File | Where-Object { $_.Name -match 'Fixture|licen[cs]e\.key|licence\.key' }) { throw "Unexpected fixture or key in release" }
-          $bytes = [IO.File]::ReadAllBytes("build/dist/INHA Grain.vst3/Contents/x86_64-win/INHA Grain.vst3")
+          $bytes = [IO.File]::ReadAllBytes("build/dist/INHA Grate.vst3/Contents/x86_64-win/INHA Grate.vst3")
           $ascii = [Text.Encoding]::ASCII.GetString($bytes)
-          foreach ($id in @('inha-grain', 'INHA-Grain-device-v1:', '0.2.0')) { if (-not $ascii.Contains($id)) { throw "Missing Grain identity: $id" } }
+          foreach ($id in @('inha-grate', 'INHA-Grate-device-v1:', '0.5.1')) { if (-not $ascii.Contains($id)) { throw "Missing Grate identity: $id" } }
       - name: Record build validation
         shell: pwsh
         run: |
           @"
-          INHA Grain 0.2.0 - Windows x64 VST3
+          INHA Grate 0.5.1 - Windows x64 VST3
           Source commit: ${{ github.sha }}
           Build: MSVC Release, static C++ runtime
           SDK: Steinberg VST3 3.7.14 build 55
-          Passed: GrainEngineTests, GrainAutomationTests, GrainModuleSmoke, GrainEditorSmoke
+          Passed: GrateEngineTests, GrateAutomationTests, GrateTimingTests, GrateWetDuckerTests, GrateWetEqualizerTests, GrateOutputLimiterTests, GrateModuleSmoke, GrateEditorSmoke
           Passed: official Steinberg VST3 validator on the production bundle
-          Editor checked at 100% and 150%, light and dark themes, UNDULATION and SWAY tabs.
-          Production licensing: INHA Core 0.1.2, product inha-grain.
+          Editor checked at 100% and 150%, light/dark themes, motion tabs, SYNC header, triplet toggles, MASS, PAN, BUFFER cap and fixed EQ range.
+          Production licensing: INHA Core 0.1.2, product inha-grate.
+          MASS: additive independently seeded slow-SWAY layers, .85 per-layer gain, unchanged main-layer level.
+          Capture: rolling stereo prehistory plus seeded 50-95 percent BUFFER duration after trigger, then frozen.
+          DUCK: actual dry-input audio controls wet reduction; defaults wet0percent, previous50percent.
+          EQ: fixed20Hz-20kHz wet cutoffs,12dB/octave, neutral endpoint bypass; statev5 importsv1-v4.
+          Output: stereo-linked peak gain control replaces the instantaneous clipping curve; no additional latency.
           No licence key or test fixture included.
           Validation uses automated audio and VST3 hosts; listening in the user's DAW is the next review step.
           "@ | Set-Content BUILD-VALIDATION.txt -Encoding utf8
       - name: Assemble package
         id: package
         shell: pwsh
-        run: ./Dependencies/INHA-Core/scripts/PackageWindowsVST3.ps1 -PluginName "INHA Grain"
+        run: ./Dependencies/INHA-Core/scripts/PackageWindowsVST3.ps1 -PluginName "INHA Grate"
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:

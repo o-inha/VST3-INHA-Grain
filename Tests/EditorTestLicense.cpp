@@ -1,4 +1,4 @@
-// Linked exclusively into GrainEditorFixture, never the release VST3.
+// Linked exclusively into GrateEditorFixture, never the release VST3.
 #ifndef INHA_EDITOR_TEST_FIXTURE
 #error "The mock licence dependency must only be built for the editor test fixture."
 #endif

@@ -12,11 +12,12 @@
 #include "AutomationTimeline.h"
 #include "ProcessorParameterState.h"
 #include "ParameterDisplay.h"
-#include "GrainEngine.h"
+#include "GrateEngine.h"
+#include "GrateTiming.h"
 #include "Version.h"
 #include "FooterIcons.h"
-#include "GrainIcons.h"
-#include "GrainPreferences.h"
+#include "GrateIcons.h"
+#include "GratePreferences.h"
 
 #include <inha/license/LicenseManager.h>
 #include <inha/parameter/Curve.h>
@@ -48,6 +49,7 @@
 #include <xmmintrin.h>
 #include <cstdlib>
 #include <cwchar>
+#include <cwctype>
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -84,37 +86,38 @@ std::wstring licenseMessageWithHelp (const std::wstring& message)
 }
 
 
-constexpr TUID componentCID = INLINE_UID (0x494E4841, 0x47524149, 0x4E465831, 0x7DA92E01);
-constexpr TUID controllerCID = INLINE_UID (0x494E4841, 0x47524149, 0x4E435431, 0x7DA92E02);
+constexpr TUID componentCID = INLINE_UID (0x494E4841, 0x47524154, 0x45465831, 0x7DA92E11);
+constexpr TUID controllerCID = INLINE_UID (0x494E4841, 0x47524154, 0x45435431, 0x7DA92E12);
 enum Parameter : ParamID {
  triggerMode, amount, sensitivity, threshold, scatter, grainMinimum, grainMaximum,
  envMinimum, envMaximum, undulationMinimum, undulationMaximum, speedMinimum, speedMaximum,
- attackMinimum, attackMaximum, releaseMinimum, releaseMaximum, duckDry, duckPrevious,
+ attackMinimum, attackMaximum, releaseMinimum, releaseMaximum, duckWet, duckPrevious,
  dryLevel, wetLevel, seedHigh, seedLow, bypass,
- motionMode, swayAmountMinimum, swayAmountMaximum, swaySpeedMinimum, swaySpeedMaximum, parameterCount
+ motionMode, swayAmountMinimum, swayAmountMaximum, swaySpeedMinimum, swaySpeedMaximum,
+ tempoSync, mass, panMinimum, panMaximum, bufferTriplets, grainTriplets, eqLowCutHz, eqHighCutHz, parameterCount
 };
 struct ParamSpec { const char* title; const char* shortTitle; const char* unit;
  double minimum, maximum, defaultValue; bool time; };
 constexpr std::array<ParamSpec,parameterCount> specs {{
  {"Trigger mode","Trigger","",0,3,1,false},
  {"MIDI trigger probability","Amount","%",0,100,50,false},
- {"Transient sensitivity","Sensitivity","%",0,100,50,false},
+ {"Transient pickup","Pickup","%",0,100,50,false},
  {"Volume threshold","Threshold","dB",-60,0,-24,false},
- {"Capture scatter","Scatter","ms",10,20000,2000,true},
- {"Grain minimum","Grain min","ms",5,10000,200,true},
- {"Grain maximum","Grain max","ms",5,10000,1000,true},
+ {"Capture buffer","Buffer","ms",40,6000,2000,true},
+ {"Grain minimum","Grain min","ms",40,6000,200,true},
+ {"Grain maximum","Grain max","ms",40,6000,1000,true},
  {"Envelope minimum","Env min","%",0,100,0,false},
  {"Envelope maximum","Env max","%",0,100,50,false},
  {"Undulation amount minimum","Undl min","%",-100,100,0,false},
  {"Undulation amount maximum","Undl max","%",-100,100,50,false},
  {"Undulation duration minimum","Speed min","%",1,400,50,false},
  {"Undulation duration maximum","Speed max","%",1,400,200,false},
- {"Event attack minimum","Attack min","ms",1,10000,500,true},
- {"Event attack maximum","Attack max","ms",1,10000,1000,true},
- {"Event release minimum","Release min","ms",5,30000,800,true},
- {"Event release maximum","Release max","ms",5,30000,10000,true},
- {"Duck dry","Duck dry","%",0,100,90,false},
- {"Duck previous event","Duck previous","%",0,100,90,false},
+ {"Event attack minimum","Attack min","ms",40,6000,500,true},
+ {"Event attack maximum","Attack max","ms",40,6000,1000,true},
+ {"Event release minimum","Release min","ms",40,6000,800,true},
+ {"Event release maximum","Release max","ms",40,6000,6000,true},
+ {"Duck wet","Duck wet","%",0,100,0,false},
+ {"Duck previous event","Duck previous","%",0,100,50,false},
  {"Dry level","Dry","dB",-60,6,0,false},
  {"Wet level","Wet","dB",-60,6,0,false},
  {"Seed high word","Seed high","",0,65535,3887,false},
@@ -123,8 +126,16 @@ constexpr std::array<ParamSpec,parameterCount> specs {{
  {"Grain motion mode","Motion","",0,1,0,false},
  {"Sway amount minimum","Sway min","%",0,100,10,false},
  {"Sway amount maximum","Sway max","%",0,100,30,false},
- {"Sway duration minimum","Sway speed min","ms",25,20000,500,true},
- {"Sway duration maximum","Sway speed max","ms",25,20000,1500,true}
+ {"Sway duration minimum","Sway speed min","ms",40,6000,500,true},
+ {"Sway duration maximum","Sway speed max","ms",40,6000,1500,true},
+ {"Tempo sync","Sync","",0,1,0,false},
+ {"Grain mass","Mass","x",1,8,1,false},
+ {"Grain pan minimum","Pan min","%",-100,100,0,false},
+ {"Grain pan maximum","Pan max","%",-100,100,0,false},
+ {"Buffer triplets","Buffer T","",0,1,0,false},
+ {"Grain triplets","Grain T","",0,1,0,false},
+ {"EQ low cut","EQ low","Hz",20,20000,20,false},
+ {"EQ high cut","EQ high","Hz",20,20000,20000,false}
 }};
 bool iidEqual (const TUID a, const TUID b) noexcept
 {
@@ -166,20 +177,23 @@ double clampNormal (double value) noexcept
 }
 
 
-bool isButtonParameter(ParamID id) noexcept { return id==triggerMode || id==motionMode || id==bypass || id==seedHigh || id==seedLow; }
+bool isButtonParameter(ParamID id) noexcept { return id==triggerMode || id==motionMode || id==tempoSync || id==bufferTriplets || id==grainTriplets || id==mass || id==bypass || id==seedHigh || id==seedLow; }
 double quantizeNormal(ParamID id,double x) noexcept {
  x=clampNormal(x); if(id==triggerMode) return std::round(x*3.0)/3.0;
- if(id==bypass || id==motionMode) return x>=0.5?1.0:0.0;
+ if(id==bypass || id==motionMode || id==tempoSync || id==bufferTriplets || id==grainTriplets) return x>=0.5?1.0:0.0;
  if(id==seedHigh || id==seedLow) return std::round(x*65535.0)/65535.0;
+ if(id==mass) return std::round(x*7.0)/7.0;
  return x;
 }
 double toPlain(ParamID id,double x) noexcept {
  if(id>=parameterCount) return 0; x=quantizeNormal(id,x); const auto& p=specs[id];
+ if(id==eqLowCutHz||id==eqHighCutHz)return 20.0*std::pow(1000.0,x);
  if(p.time) x=x*x*x;
  return p.minimum+(p.maximum-p.minimum)*x;
 }
 double toNormal(ParamID id,double x) noexcept {
  if(id>=parameterCount) return 0; const auto& p=specs[id];
+ if(id==eqLowCutHz||id==eqHighCutHz)return clampNormal(std::log(std::clamp(std::isfinite(x)?x:20.0,20.0,20000.0)/20.0)/std::log(1000.0));
  x=clampNormal((x-p.minimum)/(p.maximum-p.minimum));
  return quantizeNormal(id,p.time?std::cbrt(x):x);
 }
@@ -188,7 +202,7 @@ const char* choiceName(ParamID id,double plain) {
  if(id==triggerMode) { constexpr const char* names[]{"NONE","TRANSIENTS","MIDI NOTES","VOLUME"};
  return names[std::clamp(static_cast<int>(std::lround(plain)),0,3)]; }
  if(id==motionMode) return plain>=0.5?"SWAY":"UNDULATION";
- return id==bypass?(plain>=0.5?"ON":"OFF"):nullptr;
+ return id==bypass||id==tempoSync||id==bufferTriplets||id==grainTriplets?(plain>=0.5?"ON":"OFF"):nullptr;
 }
 std::wstring displayValue(ParamID id,double value) {
  wchar_t text[64]{};
@@ -199,16 +213,27 @@ std::wstring displayValue(ParamID id,double value) {
   if(value<=-59.9) return L"-INF";
   std::swprintf(text,64,L"%.1f dB",value);
  } else if(id==threshold) std::swprintf(text,64,L"%.1f dB",value);
+ else if(id==eqLowCutHz||id==eqHighCutHz){
+  if(value<999.5)std::swprintf(text,64,L"%.0f Hz",value);
+  else {std::swprintf(text,64,L"%.1f",value/1000.0);std::wstring frequency=text;
+   if(frequency.size()>=2&&frequency.compare(frequency.size()-2,2,L".0")==0)frequency.resize(frequency.size()-2);
+   return frequency+L" kHz";}
+ }
  else if(id==undulationMinimum || id==undulationMaximum) std::swprintf(text,64,L"%+.0f%%",value);
+ else if(id==mass) std::swprintf(text,64,L"%.0fx",value);
+ else if(id==panMinimum || id==panMaximum) {
+  if(std::abs(value)<0.5)return L"0";
+  std::swprintf(text,64,L"%.0f %lc",std::abs(value),value<0?L'L':L'R');
+ }
  else std::swprintf(text,64,L"%.0f%%",value);
  return text;
 }
-struct SavedStateHeader { std::uint32_t magic=0x47524149u,version=2; };
-constexpr std::size_t stateV1ParameterCount = 24;
-static_assert (bypass == 23 && motionMode == stateV1ParameterCount && parameterCount == 29);
+struct SavedStateHeader { std::uint32_t magic=0x47524154u,version=5; };
+constexpr std::size_t stateV1ParameterCount = 24, stateV2ParameterCount = 29, stateV3ParameterCount = 33, stateV4ParameterCount = 35;
+static_assert (bypass == 23 && motionMode == stateV1ParameterCount && tempoSync == stateV2ParameterCount && bufferTriplets == stateV3ParameterCount && eqLowCutHz == stateV4ParameterCount && parameterCount == 37);
 constexpr std::size_t maximumAutomationPoints=2048;
 using ParameterTimeline=InhaAutomation::Timeline<parameterCount,maximumAutomationPoints>;
-constexpr int sidePanelLogicalWidth=13, contentEditorWidth=498, contentLeft=13,
+constexpr int sidePanelLogicalWidth=13, contentEditorWidth=520, contentLeft=13,
  contentRight=contentLeft+contentEditorWidth, baseEditorWidth=contentEditorWidth+26,
  headerHeight=28, footerHeight=29, controlsBottom=337, baseEditorHeight=controlsBottom+footerHeight,
  zoomedEditorWidth=baseEditorWidth*3/2, zoomedEditorHeight=baseEditorHeight*3/2,
@@ -218,31 +243,41 @@ constexpr RECT footerSettingsRect{contentLeft+31,controlsBottom,contentLeft+59,b
 constexpr RECT footerButtonRect(int i) {return {footerSettingsRect.right+1+i*footerButtonStride,controlsBottom,
  footerSettingsRect.right+1+i*footerButtonStride+footerButtonWidth,baseEditorHeight};}
 constexpr RECT footerActionsArea{footerSettingsRect.left,controlsBottom,contentLeft+126,baseEditorHeight};
-constexpr RECT triggerSelectorRect{contentRight-112,0,contentRight,headerHeight};
-constexpr RECT triggerMenuRect{triggerSelectorRect.left,triggerMenuTop,contentRight,triggerMenuTop+4*triggerMenuRowHeight};
+// Match the compact INHA header controls: 62 px trigger, 47 px SYNC,
+// with only each control's own padding between its content and its neighbor.
+constexpr RECT syncRect{contentRight-47,0,contentRight,headerHeight};
+constexpr RECT triggerSelectorRect{syncRect.left-62,0,syncRect.left,headerHeight};
+constexpr RECT triggerMenuRect{triggerSelectorRect.left,triggerMenuTop,triggerSelectorRect.left+83,triggerMenuTop+4*triggerMenuRowHeight};
 constexpr RECT triggerMenuItemRect(int i){return {triggerMenuRect.left,triggerMenuTop+i*triggerMenuRowHeight,triggerMenuRect.right,triggerMenuTop+(i+1)*triggerMenuRowHeight};}
 constexpr RECT seedRefreshRect{triggerSelectorRect.left-29,0,triggerSelectorRect.left-5,headerHeight};
 constexpr RECT seedValueRect{seedRefreshRect.left-78,0,seedRefreshRect.left-1,headerHeight};
 constexpr RECT logoHitRect{contentLeft,0,contentLeft+125,headerHeight};
 constexpr std::array<RECT,2> motionTabRects{{
  {contentLeft+8,174,contentLeft+120,196},
- {contentLeft+120,174,contentLeft+190,196}
+ {contentLeft+120,174,contentLeft+177,196}
 }};
+constexpr RECT bufferTripletToggleBounds{231+16,38,231+34,52};
+constexpr RECT bufferTripletToggleFace{231+20,40,231+30,51};
+constexpr RECT grainTripletToggleBounds{315+12,38,315+30,52};
+constexpr RECT grainTripletToggleFace{315+16,40,315+26,51};
 constexpr ParamID symmetricRangeDrag=parameterCount+1,translateRangeDrag=parameterCount+2,pendingRangeDrag=parameterCount+3;
 struct Control {ParamID minimum,maximum;int x,y;const wchar_t* label;bool slider;};
-constexpr std::array<Control,12> controls{{
- {amount,parameterCount,contentLeft+53,91,L"AMOUNT",false},
- {scatter,parameterCount,contentLeft+143,91,L"SCATTER",false},
- {grainMinimum,grainMaximum,contentLeft+233,91,L"GRAIN",false},
- {envMinimum,envMaximum,contentLeft+323,91,L"ENV",false},
- {dryLevel,parameterCount,contentLeft+450,91,L"DRY",false},
- {undulationMinimum,undulationMaximum,contentLeft+53,253,L"AMOUNT",false},
- {speedMinimum,speedMaximum,contentLeft+143,253,L"SPEED",false},
- {duckDry,parameterCount,contentLeft+226,253,L"DRY",true},
- {duckPrevious,parameterCount,contentLeft+267,253,L"PRV",true},
- {attackMinimum,attackMaximum,contentLeft+320,253,L"A",true},
- {releaseMinimum,releaseMaximum,contentLeft+365,253,L"R",true},
- {wetLevel,parameterCount,contentLeft+450,253,L"WET",false}
+constexpr std::array<Control,15> controls{{
+ {mass,parameterCount,contentLeft+48,91,L"MASS",false},
+ {amount,parameterCount,contentLeft+133,91,L"AMOUNT",false},
+ {scatter,parameterCount,contentLeft+218,91,L"BUFFER",false},
+ {grainMinimum,grainMaximum,contentLeft+302,91,L"GRAIN",false},
+ {envMinimum,envMaximum,contentLeft+387,91,L"ENV",false},
+ {panMinimum,panMaximum,contentLeft+472,91,L"PAN",false},
+ {undulationMinimum,undulationMaximum,contentLeft+48,253,L"AMOUNT",false},
+ {speedMinimum,speedMaximum,contentLeft+130,253,L"SPEED",false},
+ {attackMinimum,attackMaximum,contentLeft+207,253,L"A",true},
+ {releaseMinimum,releaseMaximum,contentLeft+250,253,L"R",true},
+ {duckWet,parameterCount,contentLeft+301,253,L"WET",true},
+ {duckPrevious,parameterCount,contentLeft+339,253,L"PRV",true},
+ {eqLowCutHz,eqHighCutHz,contentLeft+397,253,L"EQ",true},
+ {dryLevel,parameterCount,contentLeft+443,253,L"DRY",true},
+ {wetLevel,parameterCount,contentLeft+489,253,L"WET",true}
 }};
 class PluginInstance;
 class NativeView final : public IPlugView
@@ -307,6 +342,7 @@ private:
     [[nodiscard]] bool pointIn (RECT rect, int x, int y) const;
     [[nodiscard]] double knobValue (RECT knob, int x, int y) const;
     [[nodiscard]] ParamID firstControlParameter() const;
+    [[nodiscard]] bool controlEnabled (ParamID) const;
     [[nodiscard]] ParamID visibleControlParameter (ParamID) const;
     [[nodiscard]] HCURSOR cursorFor (int x, int y) const;
 
@@ -346,6 +382,7 @@ private:
     Gdiplus::Image* woodRight = nullptr;
     bool lastActivity = false;
     int lastMotionMode = -1;
+    int lastTriggerMode = -1;
     LicenseStatus lastLicenseStatus = LicenseStatus::checking;
     RECT licenseHelpRect {};
     bool zoomed = false;
@@ -413,7 +450,7 @@ public:
  }
  tresult PLUGIN_API canProcessSampleSize(int32 size) override{return size==kSample32||size==kSample64?kResultTrue:kResultFalse;}
  uint32 PLUGIN_API getLatencySamples() override{return 0;}
- uint32 PLUGIN_API getProcessContextRequirements() override{return IProcessContextRequirements::kNeedTransportState;}
+ uint32 PLUGIN_API getProcessContextRequirements() override{return IProcessContextRequirements::kNeedTransportState|IProcessContextRequirements::kNeedTempo;}
  tresult PLUGIN_API setupProcessing(ProcessSetup& setup) override{
   if((setup.symbolicSampleSize!=kSample32&&setup.symbolicSampleSize!=kSample64)||!std::isfinite(setup.sampleRate)||setup.sampleRate<8000||setup.sampleRate>384000)return kResultFalse;
   sampleRate=setup.sampleRate;
@@ -437,6 +474,8 @@ public:
   if(data.symbolicSampleSize==kSample32&&(!input.channelBuffers32||!output.channelBuffers32))return kInvalidArgument;
   if(data.symbolicSampleSize==kSample64&&(!input.channelBuffers64||!output.channelBuffers64))return kInvalidArgument;
   for(int c=0;c<channels;++c)if(data.symbolicSampleSize==kSample32?(!input.channelBuffers32[c]||!output.channelBuffers32[c]):(!input.channelBuffers64[c]||!output.channelBuffers64[c]))return kInvalidArgument;
+  if(data.processContext&&(data.processContext->state&ProcessContext::kTempoValid)&&std::isfinite(data.processContext->tempo)&&data.processContext->tempo>0)
+   hostTempo.store(InhaGrate::Timing::tempo(data.processContext->tempo),std::memory_order_relaxed);
   const bool playing=data.processContext&&(data.processContext->state&ProcessContext::kPlaying);
   const auto timeline=data.processContext&&playing?data.processContext->projectTimeSamples:freeRunningSample;
   const bool discontinuity=playing&&(!hostWasPlaying||!haveExpectedSample||std::llabs(timeline-expectedSample)>1);
@@ -483,20 +522,21 @@ public:
   }
   finishAutomationBlock(data.numSamples);grainActive.store(!denied&&engine.isActive());output.silenceFlags=silentChannels;return kResultOk;
  }
- uint32 PLUGIN_API getTailSamples() override{return static_cast<uint32>(std::min(sampleRate*40.0,4294967294.0));}
+ uint32 PLUGIN_API getTailSamples() override{return static_cast<uint32>(std::min(sampleRate*(InhaGrate::Timing::maximumCaptureMilliseconds*0.002+0.1),4294967294.0));}
  tresult PLUGIN_API setComponentState(IBStream* state) override{return readState(state);}
  int32 PLUGIN_API getParameterCount() override{return parameterCount;}
  tresult PLUGIN_API getParameterInfo(int32 index,ParameterInfo& info) override{
   if(index<0||index>=parameterCount)return kInvalidArgument;const auto& p=specs[index];std::memset(&info,0,sizeof(info));
   info.id=index;copyUtf16(info.title,p.title);copyUtf16(info.shortTitle,p.shortTitle);copyUtf16(info.units,p.unit);
-  info.stepCount=index==triggerMode?3:index==bypass||index==motionMode?1:index==seedHigh||index==seedLow?65535:0;
+  info.stepCount=index==triggerMode?3:index==bypass||index==motionMode||index==tempoSync||index==bufferTriplets||index==grainTriplets?1:index==mass?7:index==seedHigh||index==seedLow?65535:0;
   info.defaultNormalizedValue=defaultStateNormalized(index);info.unitId=0;
-  info.flags=ParameterInfo::kCanAutomate|((index==triggerMode||index==motionMode)?ParameterInfo::kIsList:0)|(index==bypass?ParameterInfo::kIsBypass:0);return kResultOk;
+  info.flags=ParameterInfo::kCanAutomate|((index==triggerMode||index==motionMode||index==tempoSync||index==bufferTriplets||index==grainTriplets)?ParameterInfo::kIsList:0)|(index==bypass?ParameterInfo::kIsBypass:0);return kResultOk;
  }
  tresult PLUGIN_API getParamStringByValue(ParamID id,ParamValue normalized,String128 text) override{
   if(id>=parameterCount)return kInvalidArgument;const double p=toPlain(id,normalized);
   if(const char* name=choiceName(id,p)){copyUtf16(text,name);return kResultOk;}
-  const auto value=id==seedHigh||id==seedLow?std::to_wstring(static_cast<unsigned>(std::lround(p))):displayValue(id,p);
+  const auto value=id==seedHigh||id==seedLow?std::to_wstring(static_cast<unsigned>(std::lround(p))):
+   specs[id].time&&plain(tempoSync)>=0.5?std::wstring(InhaGrate::Timing::syncLabel(normalized,tripletsFor(id))):displayValue(id,p);
   for(std::size_t i=0;i<128;++i)text[i]=i<value.size()?static_cast<char16>(value[i]):0;
   return kResultOk;
  }
@@ -504,14 +544,35 @@ public:
   if(id>=parameterCount||!text)return kInvalidArgument;
   char b[128]{};for(int i=0;i<127&&text[i];++i)b[i]=static_cast<char>(text[i]);
   if(id==triggerMode||id==motionMode)for(int m=0;m<(id==triggerMode?4:2);++m)if(_stricmp(b,choiceName(id,m))==0){normalized=toNormal(id,m);return kResultOk;}
-  if(id==bypass&&(_stricmp(b,"ON")==0||_stricmp(b,"OFF")==0)){normalized=_stricmp(b,"ON")==0?1:0;return kResultOk;}
+  if((id==bypass||id==tempoSync||id==bufferTriplets||id==grainTriplets)&&(_stricmp(b,"ON")==0||_stricmp(b,"OFF")==0)){normalized=_stricmp(b,"ON")==0?1:0;return kResultOk;}
   if((id==dryLevel||id==wetLevel)&&_strnicmp(b,"-INF",4)==0){normalized=0;return kResultOk;}
+  if(specs[id].time&&plain(tempoSync)>=0.5){
+   std::wstring label;for(int i=0;text[i]&&i<127;++i)label.push_back(static_cast<wchar_t>(std::towupper(text[i])));
+   const auto note=InhaGrate::Timing::syncNormalizedFromLabel(label,tripletsFor(id));
+   if(note>=0){normalized=note;return kResultOk;}
+   if(label.find(L'/')!=std::wstring::npos)return kResultFalse;
+  }
   char* end=nullptr;auto value=std::strtod(b,&end);if(end==b||!std::isfinite(value))return kResultFalse;
   while(*end==' ')++end;if(specs[id].time&&(*end=='s'||*end=='S'))value*=1000;
-  normalized=toNormal(id,value);return kResultOk;
+  if((id==eqLowCutHz||id==eqHighCutHz)&&(*end=='k'||*end=='K'))value*=1000.0;
+  if(id==panMinimum||id==panMaximum){if(*end=='l'||*end=='L')value=-std::abs(value);else if(*end=='r'||*end=='R')value=std::abs(value);}
+  normalized=plainParamToNormalized(id,value);return kResultOk;
  }
- ParamValue PLUGIN_API normalizedParamToPlain(ParamID id,ParamValue value) override{return toPlain(id,value);}
- ParamValue PLUGIN_API plainParamToNormalized(ParamID id,ParamValue value) override{return toNormal(id,value);}
+ ParamValue PLUGIN_API normalizedParamToPlain(ParamID id,ParamValue value) override{
+  return id<parameterCount&&specs[id].time&&plain(tempoSync)>=0.5
+   ?InhaGrate::Timing::syncMilliseconds(value,tempoForView(),tripletsFor(id)):toPlain(id,value);
+ }
+ ParamValue PLUGIN_API plainParamToNormalized(ParamID id,ParamValue value) override{
+  if(id<parameterCount&&specs[id].time&&plain(tempoSync)>=0.5){
+   std::size_t nearest=0;double distance=std::numeric_limits<double>::max();
+   for(std::size_t i=0;i<InhaGrate::Timing::choiceCount(tripletsFor(id));++i){
+    const auto d=std::abs(InhaGrate::Timing::syncMilliseconds(InhaGrate::Timing::syncNormalized(i,tripletsFor(id)),tempoForView(),tripletsFor(id))-value);
+    if(d<distance){nearest=i;distance=d;}
+   }
+   return InhaGrate::Timing::syncNormalized(nearest,tripletsFor(id));
+  }
+  return toNormal(id,value);
+ }
  ParamValue PLUGIN_API getParamNormalized(ParamID id) override{return id<parameterCount?values[id].load():0;}
  tresult PLUGIN_API setParamNormalized(ParamID id,ParamValue value) override{if(id>=parameterCount)return kInvalidArgument;values[id].store(quantizeNormal(id,value));return kResultOk;}
     tresult PLUGIN_API setComponentHandler (IComponentHandler* handler) override
@@ -551,6 +612,8 @@ public:
         if (id >= parameterCount)
             return;
         normalized = quantizeNormal (id, normalized);
+        if (specs[id].time && plain(tempoSync)>=0.5)
+            normalized=InhaGrate::Timing::syncNormalized(InhaGrate::Timing::syncIndex(normalized,tripletsFor(id)),tripletsFor(id));
         values[id].store (normalized, std::memory_order_relaxed);
         localEditValues[id].store (normalized, std::memory_order_relaxed);
         localEditing[id].store (gesture <= 0, std::memory_order_release);
@@ -599,6 +662,11 @@ public:
         return displayStateRevision.load (std::memory_order_acquire);
     }
     [[nodiscard]] double plain (ParamID id) const { return toPlain (id, normalized (id)); }
+    [[nodiscard]] double tempoForView() const { return hostTempo.load(std::memory_order_relaxed); }
+    [[nodiscard]] bool tripletsFor(ParamID id) const {
+        return id==scatter?plain(bufferTriplets)>=0.5:
+            (id==grainMinimum||id==grainMaximum)&&plain(grainTriplets)>=0.5;
+    }
     void toggleLevelFromView (ParamID id)
     {
         if (id != dryLevel && id != wetLevel)
@@ -688,12 +756,18 @@ public:
 private:
  tresult readState(IBStream* stream){
   if(!stream)return kInvalidArgument;SavedStateHeader h{};int32 bytes=0;
-  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||h.magic!=0x47524149u||(h.version!=1&&h.version!=2))return kResultFalse;
+  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||(h.magic!=0x47524154u&&h.magic!=0x47524149u)||(h.version!=1&&h.version!=2&&h.version!=3&&h.version!=4&&h.version!=5))return kResultFalse;
   std::array<double,parameterCount> p{};
   for(ParamID id=0;id<parameterCount;++id)p[id]=defaultStateNormalized(id);
-  const auto count=h.version==1?stateV1ParameterCount:static_cast<std::size_t>(parameterCount);
+  const auto count=h.version==1?stateV1ParameterCount:h.version==2?stateV2ParameterCount:h.version==3?stateV3ParameterCount:h.version==4?stateV4ParameterCount:static_cast<std::size_t>(parameterCount);
   const int32 size=static_cast<int32>(count*sizeof(double));
   if(stream->read(p.data(),size,&bytes)!=kResultOk||bytes!=size)return kResultFalse;
+  if(h.version<3)for(ParamID id=0;id<count;++id)if(specs[id].time){
+   const double n=clampNormal(p[id]);
+   const double minimum=id==scatter?10:id==attackMinimum||id==attackMaximum?1:id==swaySpeedMinimum||id==swaySpeedMaximum?25:5;
+   const double maximum=id==scatter||id==swaySpeedMinimum||id==swaySpeedMaximum?20000:id==releaseMinimum||id==releaseMaximum?30000:10000;
+   p[id]=toNormal(id,minimum+(maximum-minimum)*n*n*n);
+  }
   for(ParamID id=0;id<parameterCount;++id){p[id]=quantizeNormal(id,p[id]);values[id].store(p[id]);localEditing[id].store(false);}
   processorParameters.restore(p);displayStateRevision.fetch_add(1);needsReset.store(true);return kResultOk;
  }
@@ -781,10 +855,18 @@ private:
     }
 
 
- InhaGrain::Parameters makeSettings(const std::array<double,parameterCount>& p) const noexcept {
-  const auto v=[&](ParamID id){return toPlain(id,p[id]);};InhaGrain::Parameters result;
+ InhaGrate::Parameters makeSettings(const std::array<double,parameterCount>& p) const noexcept {
+  const bool synced=toPlain(tempoSync,p[tempoSync])>=0.5;
+  const auto bpm=hostTempo.load(std::memory_order_relaxed);
+  const auto allowTriplets=[&](ParamID id){return id==scatter?toPlain(bufferTriplets,p[bufferTriplets])>=0.5:
+      (id==grainMinimum||id==grainMaximum)&&toPlain(grainTriplets,p[grainTriplets])>=0.5;};
+  const auto v=[&](ParamID id){return synced&&specs[id].time?InhaGrate::Timing::syncMilliseconds(p[id],bpm,allowTriplets(id)):toPlain(id,p[id]);};InhaGrate::Parameters result;
+  result.bufferTriplets=synced&&allowTriplets(scatter);result.grainTriplets=synced&&allowTriplets(grainMinimum);
+  result.synced=synced;result.tempoBpm=static_cast<float>(bpm);
+  result.durationMinimumMs=InhaGrate::Timing::minimumDuration(synced,bpm);
+  result.durationMaximumMs=InhaGrate::Timing::maximumDuration(synced,bpm);
   result.mode=static_cast<int>(std::lround(v(triggerMode)));
-  result.motionMode=static_cast<int>(std::lround(v(motionMode)));
+  result.motionMode=result.mode==0?1:static_cast<int>(std::lround(v(motionMode)));
   result.swayAmountMinPercent=v(swayAmountMinimum);result.swayAmountMaxPercent=v(swayAmountMaximum);
   result.swaySpeedMinMs=v(swaySpeedMinimum);result.swaySpeedMaxMs=v(swaySpeedMaximum);
   result.amount=v(amount);result.sensitivity=v(sensitivity);result.thresholdDb=v(threshold);result.scatterMs=v(scatter);
@@ -792,7 +874,9 @@ private:
   result.undulationMinPercent=v(undulationMinimum);result.undulationMaxPercent=v(undulationMaximum);
   result.speedMinPercent=v(speedMinimum);result.speedMaxPercent=v(speedMaximum);
   result.attackMinMs=v(attackMinimum);result.attackMaxMs=v(attackMaximum);result.releaseMinMs=v(releaseMinimum);result.releaseMaxMs=v(releaseMaximum);
-  result.duckDryPercent=v(duckDry);result.duckPreviousPercent=v(duckPrevious);result.dryDb=v(dryLevel);result.wetDb=v(wetLevel);
+  result.duckWetPercent=v(duckWet);result.duckPreviousPercent=result.mode==0?0:v(duckPrevious);result.dryDb=v(dryLevel);result.wetDb=v(wetLevel);
+  result.eqLowCutHz=v(eqLowCutHz);result.eqHighCutHz=v(eqHighCutHz);
+  result.mass=static_cast<int>(std::lround(v(mass)));result.panMinPercent=v(panMinimum);result.panMaxPercent=v(panMaximum);
   result.seed=seedFromValues(p);result.bypass=v(bypass)>=0.5;return result;
  }
  void resetEngine(){
@@ -809,10 +893,11 @@ private:
  ParameterTimeline automationTimeline;
  std::atomic<double> rememberedDryLevel{toNormal(dryLevel,0)},rememberedWetLevel{toNormal(wetLevel,0)};
  IComponentHandler* componentHandler=nullptr;IComponentHandler2* componentHandler2=nullptr;NativeView* view=nullptr;
- InhaGrain::GrainEngine engine;SpeakerArrangement arrangement=SpeakerArr::kStereo;double sampleRate=44100;
+ InhaGrate::GrateEngine engine;SpeakerArrangement arrangement=SpeakerArr::kStereo;double sampleRate=44100;
  bool prepared=false,hostWasPlaying=false,haveExpectedSample=false;TSamples expectedSample=0,freeRunningSample=0;
+ std::atomic<double> hostTempo{120.0};
  std::atomic<bool> needsReset{false},grainActive{false};
- InhaLicense::Manager license{{"inha-grain",L"INHA Grain",InhaGrainVersion::ascii,"INHA-Grain-device-v1:"}};
+ InhaLicense::Manager license{{"inha-grate",L"INHA Grate",InhaGrateVersion::ascii,"INHA-Grate-device-v1:"}};
 };
 void PluginInstance::invalidateView()
 {
@@ -823,7 +908,7 @@ void PluginInstance::invalidateView()
 NativeView::NativeView (PluginInstance& instance) : owner (instance)
 {
     owner.addRef();
-    const auto preferences = GrainPreferences::read();
+    const auto preferences = GratePreferences::read();
     darkTheme = preferences.darkTheme;
     zoomed = observedGlobalZoom = preferences.zoomed;
     viewSize = { 0, 0, zoomed ? zoomedEditorWidth : baseEditorWidth,
@@ -844,7 +929,7 @@ NativeView::NativeView (PluginInstance& instance) : owner (instance)
         }
         return image;
     };
-    headerLogo = loadImage (bundleResourcePath (L"INHA-Grain-Logo.png"));
+    headerLogo = loadImage (bundleResourcePath (L"INHA-Grate-Logo.png"));
     woodLeft = loadImage (bundleResourcePath (L"wood-left-20px.jpg"));
     woodRight = loadImage (bundleResourcePath (L"wood-right-20px.jpg"));
 }
@@ -902,10 +987,10 @@ tresult PLUGIN_API NativeView::attached (void* parent, FIDString type)
     windowClass.lpfnWndProc = windowProcedure;
     windowClass.hInstance = moduleInstance;
     windowClass.hCursor = LoadCursorW (nullptr, MAKEINTRESOURCEW (32512));
-    windowClass.lpszClassName = L"InhaGrainView_v103";
+    windowClass.lpszClassName = L"InhaGrateView_v103";
     RegisterClassExW (&windowClass);
 
-    window = CreateWindowExW (0, windowClass.lpszClassName, L"INHA Grain",
+    window = CreateWindowExW (0, windowClass.lpszClassName, L"INHA Grate",
                               WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
                               0, 0, viewSize.getWidth(), viewSize.getHeight(),
                               static_cast<HWND> (parent), nullptr, moduleInstance, this);
@@ -1126,7 +1211,8 @@ LRESULT NativeView::handleMessage (HWND hwnd, UINT message, WPARAM wParam, LPARA
                 updateFooterAnimation();
                 updateTriggerMenuAnimation();
                 pollPreferences();
-                if(lastMotionMode!=static_cast<int>(std::lround(owner.plain(motionMode))))
+                if(lastMotionMode!=static_cast<int>(std::lround(owner.plain(motionMode)))
+                   ||lastTriggerMode!=static_cast<int>(std::lround(owner.plain(triggerMode))))
                 {
                     mouseUp();
                     updateFooterTooltips();
@@ -1211,7 +1297,7 @@ void NativeView::toggleZoom()
 {
     if (! setZoom (! zoomed)) return;
     std::wstring error;
-    if (! GrainPreferences::setZoomed (zoomed, error))
+    if (! GratePreferences::setZoomed (zoomed, error))
         showPreferenceError (error);
     else
         observedGlobalZoom = zoomed;
@@ -1220,7 +1306,7 @@ void NativeView::toggleZoom()
 void NativeView::toggleTheme()
 {
     std::wstring error;
-    if (! GrainPreferences::setDarkTheme (! darkTheme, error))
+    if (! GratePreferences::setDarkTheme (! darkTheme, error))
         showPreferenceError (error);
     else
         darkTheme = ! darkTheme;
@@ -1234,7 +1320,7 @@ void NativeView::pollPreferences()
     // Do not resize a control underneath an ongoing edit or native dialog.
     if (GetCapture() == window || seedEditing || nativeDialogOpen) return;
     lastPreferencesPoll = now;
-    const auto preferences = GrainPreferences::read();
+    const auto preferences = GratePreferences::read();
     const auto themeChanged = darkTheme != preferences.darkTheme;
     darkTheme = preferences.darkTheme;
     if (preferences.zoomed != observedGlobalZoom)
@@ -1280,19 +1366,22 @@ void NativeView::updateFooterTooltips()
                       reinterpret_cast<LPARAM> (&tool));
     }
     lastMotionMode = static_cast<int> (std::lround (owner.plain (motionMode)));
-    const bool sway = lastMotionMode == 1;
+    lastTriggerMode = static_cast<int> (std::lround (owner.plain (triggerMode)));
+    const bool sway = owner.plain(triggerMode)<0.5 || lastMotionMode == 1;
     const std::array<const wchar_t*, 4> motionLabels {{
-        L"UNDULATION: one-way grain-size movement during each event. Negative AMOUNT shrinks grains; positive AMOUNT grows them. SPEED is a percentage of the event's attack + release duration.",
+        owner.plain(triggerMode)<0.5
+            ? L"UNDULATION is unavailable with trigger NONE. SWAY supplies continuous grain-size movement."
+            : L"UNDULATION: one-way grain-size movement during each event. Negative AMOUNT moves toward the selected GRAIN minimum; positive AMOUNT moves toward the duration upper limit. BUFFER caps the resulting grain size. SPEED is a percentage of the event's attack + release duration.",
         L"SWAY: continuous movement toward seeded random grain-size targets on the DAW timeline. AMOUNT is relative to the base grain size. SPEED is time between targets, independent of attack and release.",
         sway ? L"SWAY AMOUNT: depth relative to the base grain size. 20% allows targets from 80% to 120% of that size. The two handles set the randomized depth range."
-             : L"UNDULATION AMOUNT: signed grain-size movement for each event. Negative shrinks; positive grows. The two handles set the randomized amount range.",
+             : L"UNDULATION AMOUNT: signed grain-size movement for each event. Negative moves toward the selected GRAIN minimum; positive moves toward the duration upper limit. BUFFER caps the resulting grain size. The two handles set the randomized amount range.",
         sway ? L"SWAY SPEED: time between new random targets, in milliseconds / seconds. Independent of event attack and release. The two handles set the duration range."
              : L"UNDULATION SPEED: duration as a percentage of the event's attack + release. 100% uses their combined duration; 200% takes twice as long."
     }};
     const std::array<RECT, 4> motionRects {{
         motionTabRects[0], motionTabRects[1],
-        {contentLeft+14,201,contentLeft+92,319},
-        {contentLeft+104,201,contentLeft+182,319}
+        {contentLeft+9,196,contentLeft+87,319},
+        {contentLeft+91,196,contentLeft+169,319}
     }};
     for (std::size_t index = 0; index < motionRects.size(); ++index)
     {
@@ -1309,6 +1398,19 @@ void NativeView::updateFooterTooltips()
         if (!create)
             SendMessageW (footerTooltips, TTM_UPDATETIPTEXTW, 0,
                           reinterpret_cast<LPARAM> (&tool));
+    }
+    const std::array<std::pair<RECT,const wchar_t*>,2> signalTooltips{{
+        {{393,196,427,319},L"EQ: fixed cutoff frequencies for granular output. The lower handle removes lows; the upper handle removes highs. The full 20 Hz to 20 kHz range bypasses EQ. These settings do not randomize."},
+        {{297,196,331,319},L"DUCK WET: input audio turns down the granular output. Input silence lets the granular tail recover. PRV separately fades older triggered events."}
+    }};
+    for(std::size_t index=0;index<signalTooltips.size();++index){
+        const auto& item=signalTooltips[index];TOOLINFOW tool{};
+        tool.cbSize=sizeof(tool);tool.uFlags=TTF_SUBCLASS;tool.hwnd=window;
+        tool.uId=static_cast<UINT_PTR>(200+index);
+        tool.rect={scaled(item.first.left),scaled(item.first.top),scaled(item.first.right),scaled(item.first.bottom)};
+        tool.lpszText=const_cast<wchar_t*>(item.second);
+        SendMessageW(footerTooltips,create?TTM_ADDTOOLW:TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&tool));
+        if(!create)SendMessageW(footerTooltips,TTM_UPDATETIPTEXTW,0,reinterpret_cast<LPARAM>(&tool));
     }
 }
 
@@ -1422,7 +1524,7 @@ void NativeView::updateTriggerMenuHover (int x, int y)
 void NativeView::showPreferenceError (const std::wstring& error)
 {
     nativeDialogOpen = true;
-    MessageBoxW (window, error.c_str(), L"INHA Grain — could not save preferences",
+    MessageBoxW (window, error.c_str(), L"INHA Grate — could not save preferences",
                  MB_OK | MB_ICONERROR);
     nativeDialogOpen = false;
 }
@@ -1438,6 +1540,7 @@ constexpr COLORREF disabledInk = static_cast<COLORREF> (Inha::Ui::Theme::disable
 constexpr COLORREF disabledFill = static_cast<COLORREF> (Inha::Ui::Theme::disabledFill.nativeColourRef());
 constexpr COLORREF activeGreen = static_cast<COLORREF> (Inha::Ui::Theme::activeGreen.nativeColourRef());
 constexpr COLORREF activeGlow = static_cast<COLORREF> (Inha::Ui::Theme::activeGlow.nativeColourRef());
+constexpr COLORREF tripletOutline = RGB (0xbc,0xb3,0x9b);
 // Retain the family palette for consistent light and dark appearance.
 constexpr COLORREF manualRegionColour = RGB (53, 50, 43);
 // The old grid colours composited at 25% over the panel background. This is
@@ -1510,6 +1613,14 @@ void fill (HDC dc, RECT rect, COLORREF colour, int verticalPixelOffset = 0)
     const auto brush = CreateSolidBrush (colour);
     FillRect (dc, &rect, brush);
     DeleteObject (brush);
+}
+
+void outlineRect(HDC dc,RECT rect,COLORREF colour)
+{
+    fill(dc,{rect.left,rect.top,rect.right,rect.top+1},colour);
+    fill(dc,{rect.left,rect.bottom-1,rect.right,rect.bottom},colour);
+    fill(dc,{rect.left,rect.top+1,rect.left+1,rect.bottom-1},colour);
+    fill(dc,{rect.right-1,rect.top+1,rect.right,rect.bottom-1},colour);
 }
 
 void fillRightTriangle (HDC dc, RECT rect, COLORREF colour)
@@ -1847,9 +1958,12 @@ ParamID NativeView::firstControlParameter() const {
  const auto mode=static_cast<int>(std::lround(owner.plain(triggerMode)));
  return mode==1?sensitivity:mode==3?threshold:amount;
 }
+bool NativeView::controlEnabled (ParamID id) const {
+ return owner.plain(triggerMode)>=0.5 || (id!=amount && id!=duckPrevious);
+}
 ParamID NativeView::visibleControlParameter (ParamID id) const {
  if(id==amount)return firstControlParameter();
- if(owner.plain(motionMode)<0.5)return id;
+ if(owner.plain(triggerMode)>=0.5&&owner.plain(motionMode)<0.5)return id;
  if(id==undulationMinimum)return swayAmountMinimum;
  if(id==undulationMaximum)return swayAmountMaximum;
  if(id==speedMinimum)return swaySpeedMinimum;
@@ -1870,11 +1984,18 @@ RECT NativeView::verticalSliderFor(ParamID id) const {
 }
 RECT NativeView::verticalLabelFor(ParamID id) const {
  const auto r=knobFor(id);const LONG x=(r.left+r.right)/2,y=(r.top+r.bottom)/2;
- return {x-22,y-48,x+22,y-34};
+ return {x-22,y-53,x+22,y-39};
 }
 RECT NativeView::verticalValueFor(ParamID id) const {
  const auto r=knobFor(id);const LONG x=(r.left+r.right)/2,y=(r.top+r.bottom)/2;
- return {x-23,y+39,x+23,y+63};
+ RECT result{x-23,y+39,x+23,y+63};
+ // Narrow neighboring value hit areas at their midpoint, so densely spaced
+ // sliders never claim a click belonging to the adjacent value.
+ for(const auto& c:controls)if(c.y==y){
+  if(c.x<x)result.left=std::max(result.left,static_cast<LONG>((c.x+x)/2));
+  else if(c.x>x)result.right=std::min(result.right,static_cast<LONG>((c.x+x)/2));
+ }
+ return result;
 }
 bool NativeView::pointIn(RECT r,int x,int y) const {return r.right>r.left&&r.bottom>r.top&&x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 double NativeView::knobValue(RECT r,int x,int y) const {
@@ -1884,11 +2005,12 @@ double NativeView::knobValue(RECT r,int x,int y) const {
 }
 HCURSOR NativeView::cursorFor(int x,int y) const {
  const auto hand=LoadCursorW(nullptr,MAKEINTRESOURCEW(32649)),arrow=LoadCursorW(nullptr,MAKEINTRESOURCEW(32512));
- if(pointIn(licenseHelpRect,x,y)||pointIn(footerSettingsRect,x,y)||pointIn(logoHitRect,x,y)||pointIn(seedValueRect,x,y)||pointIn(seedRefreshRect,x,y)||pointIn(triggerSelectorRect,x,y))return hand;
- for(const auto& tab:motionTabRects)if(pointIn(tab,x,y))return hand;
+ if(pointIn(licenseHelpRect,x,y)||pointIn(footerSettingsRect,x,y)||pointIn(logoHitRect,x,y)||pointIn(seedValueRect,x,y)||pointIn(seedRefreshRect,x,y)||pointIn(triggerSelectorRect,x,y)||pointIn(syncRect,x,y))return hand;
+ for(int i=0;i<2;++i)if((i==1||owner.plain(triggerMode)>=0.5)&&pointIn(motionTabRects[i],x,y))return hand;
  for(int i=0;footerExpanded&&i<2;++i)if(pointIn(footerButtonRect(i),x,y))return hand;
  if(triggerMenuOpen&&triggerMenuItemAt(x,y)>=0)return hand;
- for(const auto& c:controls)if(pointIn(knobFor(c.minimum),x,y)||pointIn(verticalValueFor(c.minimum),x,y))return hand;
+ if(owner.plain(tempoSync)>=0.5&&(pointIn(bufferTripletToggleBounds,x,y)||pointIn(grainTripletToggleBounds,x,y)))return hand;
+ for(const auto& c:controls)if(controlEnabled(c.minimum)&&(pointIn(knobFor(c.minimum),x,y)||pointIn(verticalValueFor(c.minimum),x,y)))return hand;
  return arrow;
 }
 bool NativeView::updateParameterDisplay(){
@@ -1908,10 +2030,26 @@ void NativeView::paint (HDC windowDC)
     const auto lineColour = palette.lineColour;
     const auto rangeFill = palette.rangeFill;
     const auto disabledInk = palette.disabledInk;
+    const auto tripletOutline = darkTheme ? lineColour : Drawing::tripletOutline;
     (void) updateParameterDisplay();
     const auto& displayed = parameterDisplay.values();
-    const auto normalized = [&] (ParamID id) { return displayed[id]; };
+    const bool synced=toPlain(tempoSync,displayed[tempoSync])>=0.5;
+    const auto frameTempo=owner.tempoForView();
+    const auto allowTriplets=[&](ParamID id){return id==scatter?toPlain(bufferTriplets,displayed[bufferTriplets])>=0.5:
+        (id==grainMinimum||id==grainMaximum)&&toPlain(grainTriplets,displayed[grainTriplets])>=0.5;};
+    const auto normalized = [&] (ParamID id) { return synced&&specs[id].time?InhaGrate::Timing::syncNormalized(InhaGrate::Timing::syncIndex(displayed[id],allowTriplets(id)),allowTriplets(id)):displayed[id]; };
     const auto plain = [&] (ParamID id) { return toPlain (id, displayed[id]); };
+    const auto resolvedTime=[&](ParamID id){return synced?InhaGrate::Timing::syncMilliseconds(normalized(id),frameTempo,allowTriplets(id)):plain(id);};
+    const auto effectiveGrain=[&](ParamID id){
+        const auto capped=std::min(resolvedTime(id),resolvedTime(scatter));
+        if(!synced)return toNormal(id,capped);
+        const auto triplets=allowTriplets(id);
+        const auto floor=InhaGrate::Timing::floorMilliseconds(capped,frameTempo,triplets);
+        std::size_t index=0;
+        for(std::size_t i=1;i<InhaGrate::Timing::choiceCount(triplets);++i)
+            if(InhaGrate::Timing::syncMilliseconds(InhaGrate::Timing::syncNormalized(i,triplets),frameTempo,triplets)<=floor+1e-6)index=i;
+        return InhaGrate::Timing::syncNormalized(index,triplets);
+    };
     RECT client {};
     GetClientRect (window, &client);
     const auto width = std::max (1L, client.right - client.left);
@@ -1933,6 +2071,7 @@ void NativeView::paint (HDC windowDC)
 
     const auto smallFont = makeFont (10);
     const auto valueFont = makeFont (11);
+    const auto syncedSliderValueFont = makeFont (9);
     const auto linkFont = makeFont (11, true);
     const auto footerFont = makeFont (9);
     const auto sectionFont = makeFont (10);
@@ -2000,7 +2139,7 @@ void NativeView::paint (HDC windowDC)
     }
     else
     {
-        trackedText (dc, sectionFont, ink, L"INHA GRAIN",
+        trackedText (dc, sectionFont, ink, L"INHA GRATE",
                      { contentLeft + 10, 0, contentLeft + 145, headerHeight },
                      DT_LEFT, 1);
     }
@@ -2017,45 +2156,51 @@ void NativeView::paint (HDC windowDC)
                  DT_RIGHT, 0);
 
     const auto mode=std::clamp(static_cast<int>(std::lround(plain(triggerMode))),0,3);
-    constexpr std::array<const wchar_t*,4> modeNames{{L"NONE",L"TRANSIENTS",L"MIDI NOTES",L"VOLUME"}};
-    const auto modeName=modeNames[mode];
-    const auto previousFont=SelectObject(dc,sectionFont);SIZE modeTextSize{};
+    constexpr std::array<const wchar_t*,4> shortModeNames{{L"NONE",L"TRNS",L"MIDI",L"VOL"}};
+    const auto modeName=shortModeNames[mode];
+    const auto previousFont=SelectObject(dc,smallFont);SIZE modeTextSize{};
     GetTextExtentPoint32W(dc,modeName,static_cast<int>(std::wcslen(modeName)),&modeTextSize);SelectObject(dc,previousFont);
     const auto modeTextWidth=static_cast<int>(std::lround(modeTextSize.cx/renderScale));
     const auto groupWidth=19+modeTextWidth;const auto groupLeft=(triggerSelectorRect.left+triggerSelectorRect.right-groupWidth)/2;
-    {Gdiplus::Graphics graphics(dc);inha::grainIcons::draw(graphics,inha::grainIcons::Icon::trigger,
+    {Gdiplus::Graphics graphics(dc);inha::grateIcons::draw(graphics,inha::grateIcons::Icon::trigger,
       scaledReal(static_cast<float>(groupLeft)),scaledReal(7.0f),scaledReal(14.0f),smoothColour(ink));}
-    text(dc,sectionFont,ink,modeName,{groupLeft+19,0,groupLeft+groupWidth+1,headerHeight},DT_CENTER|DT_VCENTER,2);
+    text(dc,smallFont,ink,modeName,{groupLeft+19,1,groupLeft+groupWidth+1,headerHeight+1},DT_CENTER|DT_VCENTER);
+    if(synced)fill(dc,syncRect,rangeFill);
+    trackedText(dc,smallFont,ink,L"SYNC",
+                {syncRect.left,syncRect.top,syncRect.right-9,syncRect.bottom},DT_RIGHT,1);
     const auto undulationPanel=darkTheme?RGB(40,40,39):RGB(232,225,206);
     const auto duckPanel=darkTheme?RGB(35,35,34):RGB(226,219,200);
-    const auto selectedMotion=plain(motionMode)>=0.5?1:0;
-    fill(dc,{contentLeft+8,196,contentLeft+190,330},undulationPanel);
+    const auto selectedMotion=mode==0||plain(motionMode)>=0.5?1:0;
+    fill(dc,{contentLeft+8,196,contentLeft+177,330},undulationPanel);
     constexpr std::array<const wchar_t*,2> motionNames{{L"UNDULATION",L"SWAY"}};
     for(int index=0;index<2;++index){
      fill(dc,motionTabRects[index],index==selectedMotion?undulationPanel:panel);
-     text(dc,sectionFont,index==selectedMotion?ink:muted,motionNames[index],motionTabRects[index],DT_CENTER|DT_VCENTER);
+     text(dc,sectionFont,index==0&&mode==0?disabledInk:index==selectedMotion?ink:muted,motionNames[index],motionTabRects[index],DT_CENTER|DT_VCENTER);
     }
-    fill(dc,{contentLeft+198,174,contentLeft+291,330},duckPanel);
-    text(dc,sectionFont,muted,L"DUCK",{contentLeft+207,177,contentLeft+284,195},DT_LEFT|DT_VCENTER);
-    line(dc,contentLeft+398,43,contentLeft+398,322,lineColour);
+    fill(dc,{contentLeft+279,174,contentLeft+366,330},duckPanel);
+    text(dc,sectionFont,muted,L"DUCK",{contentLeft+287,177,contentLeft+359,195},DT_LEFT|DT_VCENTER);
     constexpr int radius=30;
     for(const auto& c:controls){
       const auto lo=visibleControlParameter(c.minimum);
       const auto hi=visibleControlParameter(c.maximum);
-      const bool enabled=c.minimum!=amount||mode!=0;
-      const auto label=c.minimum==amount?(mode==1?L"SENS.":mode==3?L"THLD":L"AMOUNT"):c.label;
+      const bool enabled=controlEnabled(c.minimum);
+      const auto label=c.minimum==amount?(mode==1?L"PICKUP":mode==3?L"THLD":L"AMOUNT"):c.label;
       const auto primary=enabled?ink:disabledInk,secondary=enabled?lineColour:disabledInk;
       const bool ranged=hi<parameterCount;
       const auto a=std::min(normalized(lo),ranged?normalized(hi):normalized(lo));
       const auto b=std::max(normalized(lo),ranged?normalized(hi):normalized(lo));
+      const bool grainRange=c.minimum==grainMinimum;
+      const auto effectiveA=grainRange?std::min(effectiveGrain(lo),effectiveGrain(hi)):a;
+      const auto effectiveB=grainRange?std::max(effectiveGrain(lo),effectiveGrain(hi)):b;
+      const auto pink=darkTheme?RGB(255,108,168):RGB(220,48,116);
       const auto bg=c.minimum==undulationMinimum||c.minimum==speedMinimum?undulationPanel:
-        c.minimum==duckDry||c.minimum==duckPrevious?duckPanel:panel;
+        c.minimum==duckWet||c.minimum==duckPrevious?duckPanel:panel;
       if(!c.slider){
-       if(ranged)fillSector(dc,c.x,c.y,radius-1,a,b,rangeFill);
+       if(ranged)fillSector(dc,c.x,c.y,radius-1,effectiveA,effectiveB,rangeFill);
        arc(dc,c.x,c.y,radius,0,1,secondary,1.0f);
        tick(dc,c.x,c.y,0,radius+1,radius+6,secondary);tick(dc,c.x,c.y,1,radius+1,radius+6,secondary);
        if(ranged){
-        arc(dc,c.x,c.y,radius,a,b,primary,1.5f);const auto pa=pointOnKnob(c.x,c.y,radius,a),pb=pointOnKnob(c.x,c.y,radius,b);
+        arc(dc,c.x,c.y,radius,effectiveA,effectiveB,primary,1.5f);const auto pa=pointOnKnob(c.x,c.y,radius,a),pb=pointOnKnob(c.x,c.y,radius,b);
         circleOutline(dc,pa.x,pa.y,4,enabled?muted:disabledInk,bg);circleOutline(dc,pb.x,pb.y,4,primary,bg);
        }else{
         arc(dc,c.x,c.y,radius,0,a,primary,2.0f);const auto p=pointOnKnob(c.x,c.y,radius-8,a);smoothLine(dc,c.x,c.y,p.x,p.y,primary,1.25f);
@@ -2069,25 +2214,42 @@ void NativeView::paint (HDC windowDC)
        smoothLine(dc,c.x-7,yb,c.x+7,yb,primary,1.5f);
       }
       const int half=c.slider?22:39;
-      trackedText(dc,smallFont,enabled?muted:disabledInk,label,{c.x-half,c.y-48,c.x+half,c.y-34},DT_CENTER, c.slider?0:1);
+      const bool hasTripletToggle=c.minimum==scatter||c.minimum==grainMinimum;
+      trackedText(dc,smallFont,enabled?muted:disabledInk,label,{hasTripletToggle?c.x-42:c.x-half,c.y-53,hasTripletToggle?c.x+30:c.x+half,c.y-39},DT_CENTER, c.slider?0:1);
+      if(hasTripletToggle){
+       const auto active=plain(c.minimum==scatter?bufferTriplets:grainTriplets)>=0.5;
+       const bool toggleEnabled=synced&&enabled;
+       const auto face=c.minimum==scatter?bufferTripletToggleFace:grainTripletToggleFace;
+       if(active&&toggleEnabled)fill(dc,face,ink);else outlineRect(dc,face,tripletOutline);
+       trackedText(dc,smallFont,active&&toggleEnabled?panel:toggleEnabled?ink:disabledInk,L"T",face,DT_CENTER,0);
+      }
       const auto compact=[&](ParamID id){
-       auto value=displayValue(id,plain(id));
-       if(c.slider){
-        const auto previous=SelectObject(dc,valueFont);SIZE measured{};
-        GetTextExtentPoint32W(dc,value.c_str(),static_cast<int>(value.size()),&measured);
-        SelectObject(dc,previous);
-        if(measured.cx>scaled(half*2-12)){
-         const auto space=value.find(L' ');if(space!=std::wstring::npos)value.resize(space);
+       const auto effective=grainRange?effectiveGrain(id):normalized(id);
+       auto value=synced&&specs[id].time?std::wstring(InhaGrate::Timing::syncLabel(effective,allowTriplets(id)))
+         :displayValue(id,grainRange?std::min(plain(id),plain(scatter)):plain(id));
+       if(id==dryLevel||id==wetLevel){const auto space=value.find(L' ');if(space!=std::wstring::npos)value.resize(space);}
+       if(id==eqLowCutHz||id==eqHighCutHz){const auto space=value.find(L' ');if(space!=std::wstring::npos)value.erase(space,1);}
+       if(c.slider&&specs[id].time&&!synced){
+        wchar_t duration[32]{};
+        const auto milliseconds=plain(id);
+        if(milliseconds<=999.0)std::swprintf(duration,32,L"%.0f",milliseconds);
+        else {
+         std::swprintf(duration,32,L"%.1f",milliseconds/1000.0);
+         value=duration;
+         if(value.size()>=2&&value.compare(value.size()-2,2,L".0")==0)value.resize(value.size()-2);
+         return value+L" S";
         }
+        value=duration;
        }
        return value;
       };
-      text(dc,valueFont,primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
-      const auto second=ranged?compact(hi):c.minimum==amount&&mode==2?std::wstring(L"/ NOTE"):std::wstring{};
-      text(dc,valueFont,primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
+      const auto controlValueFont=c.minimum==eqLowCutHz?smallFont:c.slider&&specs[lo].time&&synced?syncedSliderValueFont:valueFont;
+      text(dc,controlValueFont,grainRange&&resolvedTime(lo)>resolvedTime(scatter)+1e-6?pink:primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
+      const auto second=ranged?compact(hi):c.minimum==amount&&mode==2?std::wstring(L"/ NOTE"):(c.minimum==dryLevel||c.minimum==wetLevel)?std::wstring(L"dB"):std::wstring{};
+      text(dc,controlValueFont,grainRange&&resolvedTime(hi)>resolvedTime(scatter)+1e-6?pink:primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
     }
     trackedText (dc, footerFont, muted,
-                 L"v" + std::wstring (InhaGrainVersion::wide) + L" \xa9 2026 O. Inha / inha.jp",
+                 L"v" + std::wstring (InhaGrateVersion::wide) + L" \xa9 2026 O. Inha / inha.jp",
                  { contentLeft + 140, controlsBottom, contentRight - 10, baseEditorHeight },
                  DT_RIGHT, 1);
     {
@@ -2153,7 +2315,7 @@ void NativeView::paint (HDC windowDC)
         {
             const auto row = triggerMenuItemRect (index);
             if (index == triggerMenuHover) fill (dc, row, menuHover, slide);
-            text (dc, sectionFont, panel, names[static_cast<std::size_t> (index)], row,
+            text (dc, smallFont, panel, names[static_cast<std::size_t> (index)], row,
                   DT_CENTER | DT_VCENTER, slide);
         }
         if (backdrop != nullptr)
@@ -2183,6 +2345,7 @@ void NativeView::paint (HDC windowDC)
 
     DeleteObject (smallFont);
     DeleteObject (valueFont);
+    DeleteObject (syncedSliderValueFont);
     DeleteObject (linkFont);
     DeleteObject (footerFont);
     DeleteObject (sectionFont);
@@ -2196,21 +2359,25 @@ void NativeView::paint (HDC windowDC)
 void NativeView::mouseDown(int x,int y,bool rightButton){
  const auto license=owner.licenseStatusForView();
  if(license==LicenseStatus::invalidLocalKey||license==LicenseStatus::denied){if(pointIn(licenseHelpRect,x,y))ShellExecuteW(window,L"open",licenseHelpUrl,nullptr,nullptr,SW_SHOWNORMAL);return;}
+ if(!rightButton&&pointIn(syncRect,x,y)){mouseUp();if(seedEditing)commitSeed();setTriggerMenuOpen(false,true);owner.editFromView(tempoSync,owner.plain(tempoSync)>=0.5?0:1,2);return;}
  if(!rightButton&&pointIn(triggerSelectorRect,x,y)){if(seedEditing)commitSeed();triggerMenuDismissed=false;updateTriggerMenuHover(x,y);return;}
  if(triggerMenuOpen||triggerMenuReveal>0){const auto index=triggerMenuOpen?triggerMenuItemAt(x,y):-1;if(!rightButton&&index>=0)owner.editFromView(triggerMode,toNormal(triggerMode,index),2);setTriggerMenuOpen(false,true);return;}
  if(seedEditing&&!pointIn(seedValueRect,x,y))commitSeed();
  if(rightButton)return;
+ if(pointIn(bufferTripletToggleBounds,x,y)||pointIn(grainTripletToggleBounds,x,y)){
+  if(owner.plain(tempoSync)>=0.5){const auto id=pointIn(bufferTripletToggleBounds,x,y)?bufferTriplets:grainTriplets;mouseUp();owner.editFromView(id,owner.plain(id)>=0.5?0:1,2);}return;
+ }
  if(pointIn(footerSettingsRect,x,y)){setFooterExpanded(true);return;}
  for(int i=0;footerExpanded&&i<2;++i)if(pointIn(footerButtonRect(i),x,y)){mouseUp();ReleaseCapture();if(i==0)toggleTheme();else toggleZoom();return;}
  if(pointIn(logoHitRect,x,y)){toggleZoom();return;}
  if(pointIn(seedValueRect,x,y)){beginSeedEdit();return;}
  if(pointIn(seedRefreshRect,x,y)){LARGE_INTEGER ticks{};QueryPerformanceCounter(&ticks);auto seed=static_cast<std::uint32_t>(ticks.QuadPart^GetTickCount64());seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;owner.setSeedFromView(seed);return;}
- for(int index=0;index<2;++index)if(pointIn(motionTabRects[index],x,y)){
+ for(int index=0;index<2;++index)if((index==1||owner.plain(triggerMode)>=0.5)&&pointIn(motionTabRects[index],x,y)){
   mouseUp();owner.editFromView(motionMode,toNormal(motionMode,index),2);updateFooterTooltips();return;
  }
  for(auto id:{dryLevel,wetLevel})if(pointIn(verticalLabelFor(id),x,y)){owner.toggleLevelFromView(id);return;}
  for(const auto& c:controls){
-  if(c.minimum==amount&&owner.plain(triggerMode)<0.5)continue;
+  if(!controlEnabled(c.minimum))continue;
   const auto lo=visibleControlParameter(c.minimum);
   const auto hi=visibleControlParameter(c.maximum);
   const bool hitValue=pointIn(verticalValueFor(lo),x,y);
@@ -2242,7 +2409,7 @@ void NativeView::mouseDoubleClick(int x,int y){
   if(pointIn(verticalLabelFor(id),x,y))return;
  }
  for(const auto& control:controls){
-  if(control.minimum==amount&&owner.plain(triggerMode)<0.5)continue;
+  if(!controlEnabled(control.minimum))continue;
   const auto lo=visibleControlParameter(control.minimum),hi=visibleControlParameter(control.maximum);
   const auto area=control.slider?verticalSliderFor(lo):knobFor(lo);
   if(pointIn(area,x,y)||pointIn(verticalValueFor(lo),x,y)){
@@ -2361,7 +2528,7 @@ public:
         std::memcpy (info->cid, index == 0 ? componentCID : controllerCID, sizeof (TUID));
         info->cardinality = PClassInfo::kManyInstances;
         copyAscii (info->category, index == 0 ? kVstAudioEffectClass : kVstComponentControllerClass);
-        copyAscii (info->name, index == 0 ? "INHA Grain" : "INHA Grain Controller");
+        copyAscii (info->name, index == 0 ? "INHA Grate" : "INHA Grate Controller");
         return kResultOk;
     }
     tresult PLUGIN_API getClassInfo2 (int32 index, PClassInfo2* info) override
@@ -2372,11 +2539,11 @@ public:
         std::memcpy (info->cid, index == 0 ? componentCID : controllerCID, sizeof (TUID));
         info->cardinality = PClassInfo::kManyInstances;
         copyAscii (info->category, index == 0 ? kVstAudioEffectClass : kVstComponentControllerClass);
-        copyAscii (info->name, index == 0 ? "INHA Grain" : "INHA Grain Controller");
+        copyAscii (info->name, index == 0 ? "INHA Grate" : "INHA Grate Controller");
         info->classFlags = 0;
         copyAscii (info->subCategories, index == 0 ? "Fx|Delay" : "");
         copyAscii (info->vendor, "INHA");
-        copyAscii (info->version, InhaGrainVersion::ascii);
+        copyAscii (info->version, InhaGrateVersion::ascii);
         copyAscii (info->sdkVersion, "VST 3.7");
         return kResultOk;
     }
@@ -2388,10 +2555,10 @@ public:
         std::memcpy (info->cid, index == 0 ? componentCID : controllerCID, sizeof (TUID));
         info->cardinality = PClassInfo::kManyInstances;
         copyAscii (info->category, index == 0 ? kVstAudioEffectClass : kVstComponentControllerClass);
-        copyUtf16 (info->name, index == 0 ? "INHA Grain" : "INHA Grain Controller");
+        copyUtf16 (info->name, index == 0 ? "INHA Grate" : "INHA Grate Controller");
         copyAscii (info->subCategories, index == 0 ? "Fx|Delay" : "");
         copyUtf16 (info->vendor, "INHA");
-        copyUtf16 (info->version, InhaGrainVersion::ascii);
+        copyUtf16 (info->version, InhaGrateVersion::ascii);
         copyUtf16 (info->sdkVersion, "VST 3.7");
         return kResultOk;
     }
