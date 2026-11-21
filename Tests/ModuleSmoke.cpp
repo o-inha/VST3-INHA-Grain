@@ -203,7 +203,7 @@ public:
                 "Component retained the previous controller identity");
         require(component->queryInterface(IAudioProcessor_iid,reinterpret_cast<void**>(&audio))==kResultOk&&audio,"Audio processor interface missing");
         require(component->queryInterface(IEditController_iid,reinterpret_cast<void**>(&controller))==kResultOk&&controller,"Controller interface missing");
-        require(controller->getParameterCount()==35,"Parameter inventory changed unexpectedly");
+        require(controller->getParameterCount()==37,"Parameter inventory changed unexpectedly");
         require(audio->canProcessSampleSize(kSample32)==kResultTrue&&audio->canProcessSampleSize(kSample64)==kResultTrue,"Both sample formats required");
         IProcessContextRequirements* contextRequirements=nullptr;
         require(component->queryInterface(IProcessContextRequirements_iid,reinterpret_cast<void**>(&contextRequirements))==kResultOk&&contextRequirements,"VST3 process context requirements interface missing");
@@ -259,7 +259,7 @@ void replaceStateValue(MemoryStream& state,ParamID id,double value)
 void stateCompatibility(Module& module)
 {
     Instance instance(module);
-    ParameterInfo motionInfo{},syncInfo{},massInfo{},tripletInfo{};
+    ParameterInfo motionInfo{},syncInfo{},massInfo{},tripletInfo{},eqInfo{},duckInfo{};
     require(instance.controller->getParameterInfo(24,motionInfo)==kResultOk&&motionInfo.id==24
             &&motionInfo.stepCount==1&&(motionInfo.flags&ParameterInfo::kIsList)!=0
             &&(motionInfo.flags&ParameterInfo::kCanAutomate)!=0,
@@ -273,29 +273,42 @@ void stateCompatibility(Module& module)
         require(instance.controller->getParameterInfo(id,tripletInfo)==kResultOk&&tripletInfo.id==id
                 &&tripletInfo.stepCount==1&&(tripletInfo.flags&ParameterInfo::kCanAutomate)!=0,
                 "Triplet toggles must be appended automatable switches");
+    for(const ParamID id:{35u,36u})
+    {
+        require(instance.controller->getParameterInfo(id,eqInfo)==kResultOk&&eqInfo.id==id
+                &&eqInfo.stepCount==0&&(eqInfo.flags&ParameterInfo::kCanAutomate)!=0,
+                "Wet EQ cutoffs must be appended continuous automatable parameters");
+        require(eqInfo.defaultNormalizedValue==(id==35?0.0:1.0),"Default EQ endpoints were not neutral");
+    }
+    require(instance.controller->getParameterInfo(17,duckInfo)==kResultOk,"Wet duck parameter missing");
+    const std::array<char16,9> wetDuckTitle{{'D','u','c','k',' ','w','e','t',0}};
+    require(std::equal(wetDuckTitle.begin(),wetDuckTitle.end(),duckInfo.title),"Old duck automation ID did not expose Duck wet");
     String128 motionText{};
     require(instance.controller->getParamStringByValue(24,1.0,motionText)==kResultOk,
             "Could not format SWAY mode for host");
     const std::array<char16,5> expectedSway{{'S','W','A','Y',0}};
     require(std::equal(expectedSway.begin(),expectedSway.end(),motionText),"Host motion list does not label SWAY correctly");
     MemoryStream saved;
-    require(instance.component->getState(&saved)==kResultOk,"Could not save initial v4 state");
-    require(saved.bytes.size()==8+35*sizeof(double)&&stateWord(saved,0)==0x47524154u&&stateWord(saved,4)==4,
-            "Expected v4 state with 35 parameter values");
+    require(instance.component->getState(&saved)==kResultOk,"Could not save initial v5 state");
+    require(saved.bytes.size()==8+37*sizeof(double)&&stateWord(saved,0)==0x47524154u&&stateWord(saved,4)==5,
+            "Expected v5 state with 37 parameter values");
+    require(stateValue(saved,35)==0.0&&stateValue(saved,36)==1.0,"Fresh project EQ was not neutral");
+    require(stateValue(saved,17)==instance.normalized(17,0)&&stateValue(saved,18)==instance.normalized(18,50),
+            "New projects did not use zero wet duck and fifty-percent previous-event duck");
     const auto setPlain=[&](ParamID id,double plain){replaceStateValue(saved,id,instance.normalized(id,plain));};
     // Independent motion banks and new controls must survive a full project save.
     setPlain(4,500);setPlain(5,2000);setPlain(6,4000); // Preserve requests exceeding BUFFER.
     setPlain(9,-35);setPlain(10,45);setPlain(11,75);setPlain(12,180);
     setPlain(24,1);setPlain(25,17);setPlain(26,63);setPlain(27,250);setPlain(28,3500);
-    setPlain(29,1);setPlain(30,6);setPlain(31,-70);setPlain(32,85);setPlain(33,1);setPlain(34,1);
+    setPlain(29,1);setPlain(30,6);setPlain(31,-70);setPlain(32,85);setPlain(33,1);setPlain(34,1);setPlain(35,180);setPlain(36,8500);
     saved.position=0;
-    require(instance.component->setState(&saved)==kResultOk,"Could not restore v4 state");
+    require(instance.component->setState(&saved)==kResultOk,"Could not restore v5 state");
     MemoryStream restored;
     require(instance.component->getState(&restored)==kResultOk&&saved.bytes==restored.bytes,
-            "v4 state round trip lost requested ranges or new controls");
+            "v5 state round trip lost requested ranges or new controls");
     saved.position=0;
-    require(instance.controller->setComponentState(&saved)==kResultOk,"Controller rejected v4 state");
-    for(ParamID id:{4u,5u,6u,9u,10u,11u,12u,24u,25u,26u,27u,28u,29u,30u,31u,32u,33u,34u})
+    require(instance.controller->setComponentState(&saved)==kResultOk,"Controller rejected v5 state");
+    for(ParamID id:{4u,5u,6u,9u,10u,11u,12u,24u,25u,26u,27u,28u,29u,30u,31u,32u,33u,34u,35u,36u})
         require(instance.controller->getParamNormalized(id)==stateValue(saved,id),"Controller lost an independent parameter");
 
     // Construct actual old encodings, rather than relabelling current normalized values.
@@ -316,8 +329,8 @@ void stateCompatibility(Module& module)
         if(version==2){replaceStateValue(legacy,27,oldTime(250,25,20000));replaceStateValue(legacy,28,oldTime(3500,25,20000));}
         require(instance.component->setState(&legacy)==kResultOk,"Existing project version is not compatible");
         migrated.bytes.clear();migrated.position=0;
-        require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==4&&stateWord(migrated,0)==0x47524154u,
-                "Legacy project did not migrate to v4 state");
+        require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==5&&stateWord(migrated,0)==0x47524154u,
+                "Legacy project did not migrate to v5 state");
         for(const auto expected:std::array<std::pair<ParamID,double>,7>{{{4,2000},{5,40},{6,1200},{13,500},{14,1000},{15,800},{16,6000}}})
             require(std::abs(stateValue(migrated,expected.first)-instance.normalized(expected.first,expected.second))<1e-10,
                     "Migration did not preserve and clip old milliseconds");
@@ -340,27 +353,37 @@ void stateCompatibility(Module& module)
                 &&stateValue(migrated,30)==instance.normalized(30,1)
                 &&stateValue(migrated,31)==instance.normalized(31,0)
                 &&stateValue(migrated,32)==instance.normalized(32,0)
-                &&stateValue(migrated,33)==0.0&&stateValue(migrated,34)==0.0,"Legacy project did not initialize new controls safely");
+                &&stateValue(migrated,33)==0.0&&stateValue(migrated,34)==0.0
+                &&stateValue(migrated,35)==0.0&&stateValue(migrated,36)==1.0,"Legacy project did not initialize new controls safely");
     }
     // v3 already uses the current time encoding and retains all 33 old lanes.
     MemoryStream v3;
     v3.bytes=saved.bytes;v3.bytes.resize(8+33*sizeof(double));replaceStateWord(v3,4,3);replaceStateWord(v3,0,0x47524149u);
     require(instance.component->setState(&v3)==kResultOk,"Existing v3 projects are not compatible");
     migrated.bytes.clear();migrated.position=0;
-    require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==4&&stateWord(migrated,0)==0x47524154u,
-            "v3 project did not migrate to v4 state");
+    require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==5&&stateWord(migrated,0)==0x47524154u,
+            "v3 project did not migrate to v5 state");
     for(ParamID id=0;id<33;++id)
         require(stateValue(migrated,id)==stateValue(v3,id),"v3 migration changed an existing parameter");
     require(stateValue(migrated,33)==0.0&&stateValue(migrated,34)==0.0,
             "v3 project did not default both triplet switches off");
+    require(stateValue(migrated,35)==0.0&&stateValue(migrated,36)==1.0,"v3 project did not load neutral EQ");
 
-    // The new factory IDs are separate; explicitly importing an old v4 preset is supported.
-    MemoryStream previousV4;
-    previousV4.bytes=saved.bytes;replaceStateWord(previousV4,0,0x47524149u);
-    require(instance.component->setState(&previousV4)==kResultOk,"Manual import of a previous v4 preset failed");
-    migrated.bytes.clear();migrated.position=0;
-    require(instance.component->getState(&migrated)==kResultOk&&migrated.bytes==saved.bytes,
-            "Manual preset import lost parameters or did not write the new product state identity");
+    // Both prior Grate v4 projects and manually imported Grain v4 presets keep
+    // their 35 existing controls and receive neutral values for the two new cuts.
+    for(const auto magic:{0x47524154u,0x47524149u})
+    {
+        MemoryStream previousV4;
+        previousV4.bytes=saved.bytes;previousV4.bytes.resize(8+35*sizeof(double));
+        replaceStateWord(previousV4,0,magic);replaceStateWord(previousV4,4,4);
+        require(instance.component->setState(&previousV4)==kResultOk,"Import of a previous v4 project/preset failed");
+        migrated.bytes.clear();migrated.position=0;
+        require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==5
+                &&stateWord(migrated,0)==0x47524154u,"v4 project did not write the new state identity");
+        for(ParamID id=0;id<35;++id)
+            require(stateValue(migrated,id)==stateValue(previousV4,id),"v4 import lost an existing parameter");
+        require(stateValue(migrated,35)==0.0&&stateValue(migrated,36)==1.0,"v4 import did not initialize neutral EQ");
+    }
 
     const auto rejected=[&](MemoryStream& invalid,const char* message)
     {
@@ -372,10 +395,10 @@ void stateCompatibility(Module& module)
     };
     MemoryStream invalid;invalid.bytes=saved.bytes;replaceStateWord(invalid,0,0);rejected(invalid,"Invalid state magic accepted");
     invalid.bytes=saved.bytes;replaceStateWord(invalid,4,99);rejected(invalid,"Unknown future state version accepted");
-    invalid.bytes=saved.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated v4 parameter payload accepted");
+    invalid.bytes=saved.bytes;invalid.bytes.pop_back();rejected(invalid,"Truncated v5 parameter payload accepted");
     invalid.bytes.assign(4,0);rejected(invalid,"Truncated state header accepted");
     require(instance.component->setState(nullptr)!=kResultOk,"Null state stream accepted");
-    std::cout<<"v1/v2 millisecond migration, v3 compatibility, v4 state, new controls and invalid-state rejection passed\n";
+    std::cout<<"v1-v4 migration, v5 wet EQ state, new controls and invalid-state rejection passed\n";
 }
 
 template<typename Sample> void formatSmoke(Module& module,int channels,int symbolic) {
@@ -573,6 +596,150 @@ void tripletChoicesHost(Module& module)
     std::cout<<"Independent BUFFER/GRAIN triplet parsing, labels, durations and retained settings passed\n";
 }
 
+void eqFrequencyChoicesHost(Module& module)
+{
+    Instance instance(module);
+    const auto parse=[&](ParamID id,const char* label,double& normalized)
+    {
+        String128 text{};for(std::size_t i=0;label[i]&&i<127;++i)text[i]=static_cast<char16>(label[i]);
+        return instance.controller->getParamValueByString(id,text,normalized);
+    };
+    const auto formatted=[&](ParamID id,double normalized)
+    {
+        String128 text{};require(instance.controller->getParamStringByValue(id,normalized,text)==kResultOk,
+                                "Cannot format EQ cutoff for host");
+        std::string result;for(const auto c:text){if(!c)break;result.push_back(static_cast<char>(c));}return result;
+    };
+    require(instance.controller->setParamNormalized(29,1)==kResultOk,"Cannot enable SYNC for frequency-unit check");
+    for(const ParamID id:{35u,36u})
+    {
+        ParameterInfo info{};require(instance.controller->getParameterInfo(id,info)==kResultOk,"EQ parameter metadata missing");
+        require(info.units[0]=='H'&&info.units[1]=='z'&&info.units[2]==0,"EQ host unit is not Hz");
+        require(std::abs(instance.controller->normalizedParamToPlain(id,0)-20)<1e-10
+                &&std::abs(instance.controller->normalizedParamToPlain(id,1)-20000)<1e-8,
+                "EQ cutoff range does not cover20Hz through20kHz");
+        require(std::abs(instance.normalized(id,200)-1.0/3.0)<1e-10
+                &&std::abs(instance.normalized(id,2000)-2.0/3.0)<1e-10,
+                "EQ slider does not distribute frequency logarithmically");
+        for(const double hz:{20.0,125.0,2000.0,20000.0})
+        {
+            const auto normalized=instance.normalized(id,hz);
+            const auto label=formatted(id,normalized);
+            require(label.find("Hz")!=std::string::npos,"SYNC changed an EQ cutoff into musical units");
+            double restored=0;
+            require(parse(id,label.c_str(),restored)==kResultOk
+                    &&std::abs(instance.controller->normalizedParamToPlain(id,restored)-hz)<1e-6,
+                    "EQ frequency text did not round-trip through the host");
+        }
+        double value=0;
+        require(parse(id,"2 kHz",value)==kResultOk
+                &&std::abs(instance.controller->normalizedParamToPlain(id,value)-2000)<1e-6,
+                "EQ parser did not accept kHz input");
+        require(parse(id,"250 Hz",value)==kResultOk
+                &&std::abs(instance.controller->normalizedParamToPlain(id,value)-250)<1e-6,
+                "EQ parser did not accept Hz input");
+    }
+    std::cout<<"Logarithmic EQ frequency range, Hz/kHz text, and SYNC independence passed\n";
+}
+
+void wetEqAndDuckingHost(Module& module)
+{
+    using Audio=std::array<std::vector<float>,2>;
+    constexpr int rate=48000,blockFrames=256,blocks=384;
+    constexpr double pi=3.14159265358979323846;
+    const auto render=[&](double toneHz,double lowHz,double highHz,double duckPercent,
+                          bool frozen,bool dryOnly,bool automateHigh,double leftAmplitude,double rightAmplitude)
+    {
+        Instance instance(module);MemoryStream configured;
+        require(instance.component->getState(&configured)==kResultOk,"Cannot configure wet EQ/duck render");
+        const auto set=[&](ParamID id,double plain){replaceStateValue(configured,id,instance.normalized(id,plain));};
+        set(0,frozen?2:0);set(1,100);set(4,300);set(5,80);set(6,80);set(7,50);set(8,50);
+        set(9,0);set(10,0);set(13,40);set(14,40);set(15,6000);set(16,6000);
+        set(17,duckPercent);set(18,0);set(19,dryOnly?0:-60);set(20,dryOnly?-60:0);
+        set(24,1);set(25,0);set(26,0);set(30,1);set(31,0);set(32,0);set(35,lowHz);set(36,highHz);
+        configured.position=0;
+        require(instance.component->setState(&configured)==kResultOk,"Cannot load wet EQ/duck settings");
+        instance.setup(2,kSample32);
+        std::array<std::array<float,blockFrames>,2> input{},output{};
+        float* ins[2]{input[0].data(),input[1].data()};float* outs[2]{output[0].data(),output[1].data()};
+        AudioBusBuffers in{},out{};in.numChannels=out.numChannels=2;in.channelBuffers32=ins;out.channelBuffers32=outs;
+        ProcessContext context{};context.sampleRate=rate;context.state=ProcessContext::kPlaying;
+        ProcessData data{};data.processMode=kRealtime;data.symbolicSampleSize=kSample32;data.numSamples=blockFrames;
+        data.numInputs=data.numOutputs=1;data.inputs=&in;data.outputs=&out;data.processContext=&context;
+        Audio audio;for(auto& channel:audio)channel.reserve(blockFrames*blocks);
+        for(int block=0;block<blocks;++block)
+        {
+            for(int i=0;i<blockFrames;++i)
+            {
+                const int n=block*blockFrames+i;
+                const auto signal=frozen&&n>=rate?0.0:toneHz==0?1.0:std::sin(2*pi*toneHz*n/rate);
+                input[0][i]=static_cast<float>(leftAmplitude*signal);input[1][i]=static_cast<float>(rightAmplitude*signal);
+            }
+            Events events;if(frozen&&block==96)events.note(128);data.inputEvents=&events;
+            Changes automation;
+            if(automateHigh&&block==128)
+            {
+                automation.add(36,0,instance.normalized(36,20000));
+                automation.add(36,173,instance.normalized(36,500));
+            }
+            data.inputParameterChanges=automateHigh&&block==128?&automation:nullptr;
+            context.projectTimeSamples=block*blockFrames;
+            require(instance.audio->process(data)==kResultOk,"Wet EQ/duck callback failed");
+            for(int c=0;c<2;++c)for(int i=0;i<blockFrames;++i)
+            {
+                require(std::isfinite(output[c][i]),"Wet EQ/duck produced non-finite host audio");
+                if(dryOnly)require(output[c][i]==input[c][i],"Wet EQ or sidechain duck changed the dry audio path");
+                audio[c].push_back(output[c][i]);
+            }
+        }
+        return audio;
+    };
+    const auto energy=[](const Audio& audio,int channel,int start,int end)
+    {
+        double result=0;for(int i=start;i<end;++i)result+=static_cast<double>(audio[channel][i])*audio[channel][i];return result;
+    };
+    const auto neutral=render(0,20,20000,0,false,false,false,0.14,0.09);
+    for(int n=rate/2;n<rate;++n)
+        require(std::abs(neutral[0][n]-0.14f)<1e-5f&&std::abs(neutral[1][n]-0.09f)<1e-5f,
+                "Default wet EQ endpoints did not preserve a constant stereo source");
+    const auto bass=render(120,20,20000,0,false,false,false,0.14,0.09);
+    const auto highPassed=render(120,2000,20000,0,false,false,false,0.14,0.09);
+    const auto treble=render(6000,20,20000,0,false,false,false,0.14,0.09);
+    const auto lowPassed=render(6000,20,500,0,false,false,false,0.14,0.09);
+    for(int c=0;c<2;++c)
+    {
+        const auto bassEnergy=energy(bass,c,rate,rate*2),trebleEnergy=energy(treble,c,rate,rate*2);
+        require(bassEnergy>0.001&&trebleEnergy>0.001,"Wet EQ test did not exercise audible granular output");
+        require(energy(highPassed,c,rate,rate*2)<bassEnergy*0.15,"Host low-cut parameter did not remove wet bass");
+        require(energy(lowPassed,c,rate,rate*2)<trebleEnergy*0.15,"Host high-cut parameter did not remove wet treble");
+    }
+    for(int n=rate;n<rate*2;++n)
+        require(std::abs(lowPassed[1][n]-lowPassed[0][n]*(0.09f/0.14f))<1e-5f,
+                "Wet EQ mixed the stereo channels instead of filtering them independently");
+    const auto automated=render(6000,20,20000,0,false,false,true,0.14,0.09);
+    for(int n=0;n<128*blockFrames;++n)
+        require(automated[0][n]==treble[0][n]&&automated[1][n]==treble[1][n],
+                "EQ cutoff automation affected an earlier processing block");
+    require(energy(automated,0,rate,rate*2)<energy(treble,0,rate,rate*2)*0.15,
+            "In-block EQ cutoff automation did not reach the wet audio processor");
+
+    // The quiet left source cannot trigger strong ducking alone: the louder
+    // right input must drive the same gain on both wet channels while DRY is muted.
+    const auto noDuck=render(220,20,20000,0,true,false,false,0.01,0.5);
+    const auto ducked=render(220,20,20000,100,true,false,false,0.01,0.5);
+    for(int c=0;c<2;++c)
+    {
+        const auto early=energy(noDuck,c,40800,47500),late=energy(noDuck,c,67200,86400);
+        require(early>1e-5&&late>1e-5,"Frozen-tail duck test did not contain audible captured audio");
+        const auto earlyRatio=energy(ducked,c,40800,47500)/early;
+        const auto lateRatio=energy(ducked,c,67200,86400)/late;
+        require(earlyRatio<0.15,"Raw stereo input did not sidechain-duck the wet output with DRY muted");
+        require(lateRatio>0.7&&lateRatio>earlyRatio+0.5,"Wet duck did not recover after the dry input stopped");
+    }
+    render(220,1500,2500,100,true,true,false,0.24,0.18);
+    std::cout<<"Neutral wet EQ, stereo cuts, in-block cutoff automation, linked wet duck/recovery and exact dry preservation passed\n";
+}
+
 void fixtureOffsets(Module& module) {
     const auto silent=renderFixture(module,-1),note=renderFixture(module,128),repeated=renderFixture(module,128);
     for(int i=0;i<128;++i)require(std::abs(note[i]-silent[i])<1e-7f,"MIDI note affected audio before its sample offset");
@@ -605,7 +772,7 @@ int wmain(int argc,wchar_t** argv) {
     try{
         require(argc==3,"Usage: GrateModuleSmoke <production-vst3-binary> <fixture-binary>");
         {Module production(argv[1]);formatSmoke<float>(production,1,kSample32);formatSmoke<float>(production,2,kSample32);formatSmoke<double>(production,1,kSample64);formatSmoke<double>(production,2,kSample64);}
-        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);transportRestartRepeatability(fixture);syncAndPanHost(fixture);tripletChoicesHost(fixture);}
+        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);transportRestartRepeatability(fixture);syncAndPanHost(fixture);tripletChoicesHost(fixture);eqFrequencyChoicesHost(fixture);wetEqAndDuckingHost(fixture);}
         std::cout<<"Grate Windows module smoke passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

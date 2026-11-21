@@ -155,6 +155,7 @@ void GrateEngine::prepare (double sampleRate)
     sampleRate_ = std::clamp (std::isfinite (sampleRate) ? sampleRate : 48000.0,
                               8000.0, 384000.0);
     capacity_ = static_cast<std::size_t> (std::ceil (sampleRate_ * Timing::maximumCaptureMilliseconds * 0.001)) + 8;
+    history_.assign (capacity_ * 2, 0.0f);
     for (auto& event : events_)
         event.samples.assign (capacity_ * 2, 0.0f);
 
@@ -182,6 +183,8 @@ void GrateEngine::prepare (double sampleRate)
     gainAttack_ = coefficient (3.0, sampleRate_);
     gainRelease_ = coefficient (30.0, sampleRate_);
     massSmoothing_ = coefficient (10.0, sampleRate_);
+    wetDucker_.prepare (sampleRate_);
+    wetEq_.prepare (sampleRate_);
     setParameters (parameters_);
     dryTarget_ = dbGain (parameters_.dryDb);
     wetTarget_ = dbGain (parameters_.wetDb);
@@ -194,11 +197,14 @@ void GrateEngine::reset (std::int64_t timelineSample) noexcept
     timeline_ = timelineSample;
     triggerLockUntil_ = timelineSample;
     pendingNotes_ = 0;
+    historyWritten_ = 0;
     fast_ = slow_ = volume_ = activity_ = 0.0f;
     transientHigh_ = volumeHigh_ = false;
     dryGain_ = dryTarget_;
     wetGain_ = wetTarget_;
-    dryDuck_ = wetBudgetGain_ = 1.0f;
+    wetDucker_.reset();
+    wetEq_.reset();
+    wetBudgetGain_ = 1.0f;
     bypassMix_ = parameters_.bypass ? 1.0f : 0.0f;
     currentMode_ = parameters_.mode;
     for (auto& event : events_)
@@ -240,10 +246,14 @@ void GrateEngine::setParameters (const Parameters& values) noexcept
     p.attackMaxMs = finiteClamp (p.attackMaxMs, low, high, 1000);
     p.releaseMinMs = finiteClamp (p.releaseMinMs, low, high, 800);
     p.releaseMaxMs = finiteClamp (p.releaseMaxMs, low, high, 6000);
-    p.duckDryPercent = finiteClamp (p.duckDryPercent, 0, 100, 90);
-    p.duckPreviousPercent = finiteClamp (p.duckPreviousPercent, 0, 100, 90);
+    p.duckWetPercent = finiteClamp (p.duckWetPercent, 0, 100, 0);
+    p.duckPreviousPercent = finiteClamp (p.duckPreviousPercent, 0, 100, 50);
     p.dryDb = finiteClamp (p.dryDb, -60, 6, 0);
     p.wetDb = finiteClamp (p.wetDb, -60, 6, 0);
+    p.eqLowCutHz = finiteClamp (p.eqLowCutHz, 20, 20000, 20);
+    p.eqHighCutHz = finiteClamp (p.eqHighCutHz, 20, 20000, 20000);
+    if (p.eqLowCutHz > p.eqHighCutHz) std::swap (p.eqLowCutHz, p.eqHighCutHz);
+    wetEq_.setCutoffs (p.eqLowCutHz, p.eqHighCutHz);
     p.motionMode = std::clamp (p.motionMode, 0, 1);
     p.swayAmountMinPercent = finiteClamp (p.swayAmountMinPercent, 0, 100, 10);
     p.swayAmountMaxPercent = finiteClamp (p.swayAmountMaxPercent, 0, 100, 30);
@@ -336,11 +346,22 @@ GrateEngine::Event* GrateEngine::startEvent (bool live, bool held,
     }
     event.captureLimit = std::min<std::uint64_t> (capacity_, samplesForMs (
         parameters_.scatterMs));
+    // Keep a little pre-trigger context, then capture a seeded 50..95 percent
+    // of BUFFER after firing. Missing transport-start history is known silence.
+    event.capturePostFrames = live ? event.captureLimit : std::clamp<std::uint64_t> (
+        static_cast<std::uint64_t> (std::llround (event.captureLimit *
+            (0.50 + 0.45 * random (key, 0x43415054555245ULL)))), 1, event.captureLimit);
+    const auto prefix = event.captureLimit - event.capturePostFrames;
+    event.historyCount = std::min ({ prefix, historyWritten_, static_cast<std::uint64_t> (capacity_) });
+    event.historyBegin = historyWritten_ - event.historyCount;
+    event.historyCopied = 0;
+    event.historyZeroFrames = prefix - event.historyCount;
+    event.written = prefix;
     event.previousGrain.fill (0);
     const auto first = std::min (samplesForMs (parameters_.durationMinimumMs), event.captureLimit);
     const auto stagger = std::max<std::uint64_t> (1, first / (2 * maxStreams));
     for (std::size_t stream = 0; stream < maxStreams; ++stream)
-        event.nextGrain[stream] = static_cast<std::int64_t> (first + stream * stagger);
+        event.nextGrain[stream] = static_cast<std::int64_t> ((live ? first : 0) + stream * stagger);
     event.layerSerial.fill (0);
     event.layerActivationSerial.fill (0);
     event.layerEnabled.fill (false);
@@ -524,6 +545,14 @@ float GrateEngine::grainWindow (const Grain& grain) const noexcept
 float GrateEngine::readSample (const Event& event, std::uint64_t frame,
                               unsigned channel) const noexcept
 {
+    if (frame < event.historyZeroFrames)
+        return 0.0f;
+    if (frame < event.historyZeroFrames + event.historyCount)
+    {
+        const auto prefixFrame = frame - event.historyZeroFrames;
+        if (prefixFrame >= event.historyCopied)
+            return history_[static_cast<std::size_t> ((event.historyBegin + prefixFrame) % capacity_) * 2 + channel];
+    }
     return event.samples[static_cast<std::size_t> (frame % capacity_) * 2 + channel];
 }
 
@@ -593,10 +622,10 @@ std::array<float, 2> GrateEngine::renderEvent (Event& event) noexcept
             grain.active = false;
     }
     // Normalize overlaps within each layer before applying its .85^index
-    // contribution. A new layer's ramp starts only once audible samples exist;
+    // additive contribution. WET controls the resulting combined level.
+    // A new layer's ramp starts only once audible samples exist;
     // otherwise normalization would cancel its first grain's envelope fade.
     std::array<float, 2> output {};
-    float totalLayerWeight = 1.0f;
     bool hasExtraLayer = false;
     for (std::size_t layer = 1; layer < maxStreams; ++layer)
     {
@@ -609,7 +638,6 @@ std::array<float, 2> GrateEngine::renderEvent (Event& event) noexcept
             continue;
         hasExtraLayer = true;
         const auto contribution = gain * massLayerWeight (layer);
-        totalLayerWeight += contribution;
         const auto scale = contribution / std::max (1.0e-12f, layerWindowSum[layer]);
         output[0] += layerOutput[layer][0] * scale;
         output[1] += layerOutput[layer][1] * scale;
@@ -631,9 +659,8 @@ std::array<float, 2> GrateEngine::renderEvent (Event& event) noexcept
         const auto scale = 1.0f / std::max (1.0e-12f, layerWindowSum[0]);
         output[0] += layerOutput[0][0] * scale;
         output[1] += layerOutput[0][1] * scale;
-        const auto gain = commonGain / totalLayerWeight;
-        output[0] *= gain;
-        output[1] *= gain;
+        output[0] *= commonGain;
+        output[1] *= commonGain;
     }
     ++event.age;
     return output;
@@ -722,11 +749,22 @@ std::array<float, 2> GrateEngine::process (float left, float right) noexcept
     pendingNotes_ = 0;
 
     std::array<float, 2> wet {};
-    float maximumEnvelope = 0.0f, envelopeSum = 0.0f;
+    float envelopeSum = 0.0f;
     for (auto& event : events_)
     {
         if (!event.active)
             continue;
+        // Stage only one old prefix frame per event per callback. Any prefix
+        // not staged yet remains readable directly from the shared history.
+        // Prefix <= post quota, so all real history is owned locally by freeze.
+        if (event.historyCopied < event.historyCount)
+        {
+            const auto source = static_cast<std::size_t> ((event.historyBegin + event.historyCopied) % capacity_) * 2;
+            const auto destination = static_cast<std::size_t> (event.historyZeroFrames + event.historyCopied) * 2;
+            event.samples[destination] = history_[source];
+            event.samples[destination + 1] = history_[source + 1];
+            ++event.historyCopied;
+        }
         if (event.live || event.written < event.captureLimit)
         {
             const auto position = static_cast<std::size_t> (event.written % capacity_) * 2;
@@ -738,17 +776,21 @@ std::array<float, 2> GrateEngine::process (float left, float right) noexcept
         wet[0] += audio[0];
         wet[1] += audio[1];
         const auto envelope = event.active ? event.envelope * event.pressureGain : 0.0f;
-        maximumEnvelope = std::max (maximumEnvelope, envelope);
         envelopeSum += envelope;
     }
+    // Record after every event has read/copied history: the triggering sample
+    // belongs to the post-trigger body, never to its pre-trigger context.
+    const auto historyPosition = static_cast<std::size_t> (historyWritten_ % capacity_) * 2;
+    history_[historyPosition] = left;
+    history_[historyPosition + 1] = right;
+    ++historyWritten_;
     // Prevent a pile of long tails from multiplying perceived level. The
     // slow gain recovery keeps retiring tails from pumping their successors.
     const auto budgetTarget = 1.0f / std::max (1.0f, envelopeSum);
     wetBudgetGain_ += (budgetTarget - wetBudgetGain_) *
         (budgetTarget < wetBudgetGain_ ? gainAttack_ : gainRelease_);
-    const auto duckTarget = 1.0f - maximumEnvelope * parameters_.duckDryPercent * 0.01f;
-    dryDuck_ += (duckTarget - dryDuck_) *
-        (duckTarget < dryDuck_ ? gainAttack_ : gainRelease_);
+    wet = wetEq_.process (wet);
+    const auto wetDuckGain = wetDucker_.process (left, right, parameters_.duckWetPercent);
     dryGain_ += (dryTarget_ - dryGain_) * gainAttack_;
     wetGain_ += (wetTarget_ - wetGain_) * gainAttack_;
     const auto bypassTarget = parameters_.bypass ? 1.0f : 0.0f;
@@ -760,14 +802,15 @@ std::array<float, 2> GrateEngine::process (float left, float right) noexcept
     if (std::abs (bypassTarget - bypassMix_) < 0.000001f ||
         bypassMix_ == previousBypassMix)
         bypassMix_ = bypassTarget;
-    const auto wetActivity = std::max (std::abs (wet[0]), std::abs (wet[1])) * wetGain_;
+    const auto wetActivity = std::max (std::abs (wet[0]), std::abs (wet[1])) *
+        wetGain_ * wetBudgetGain_ * wetDuckGain;
     activity_ += (wetActivity - activity_) * (wetActivity > activity_ ? gainAttack_ : gainRelease_);
     std::array<float, 2> result;
     const std::array<float, 2> dry {{ left, right }};
     for (unsigned channel = 0; channel != 2; ++channel)
     {
-        const auto processed = dry[channel] * dryGain_ * dryDuck_ +
-            wet[channel] * wetGain_ * wetBudgetGain_;
+        const auto processed = dry[channel] * dryGain_ +
+            wet[channel] * wetGain_ * wetBudgetGain_ * wetDuckGain;
         // Peak protection belongs to the effected branch. Full bypass must
         // preserve the original input, including legitimate interstage peaks.
         result[channel] = protect (processed) * (1.0f - bypassMix_) +
@@ -780,7 +823,7 @@ std::array<float, 2> GrateEngine::process (float left, float right) noexcept
 
 std::size_t GrateEngine::memoryBytes() const noexcept
 {
-    std::size_t bytes = sizeof (*this);
+    std::size_t bytes = sizeof (*this) + history_.capacity() * sizeof (float);
     for (const auto& event : events_)
         bytes += event.samples.capacity() * sizeof (float);
     return bytes;

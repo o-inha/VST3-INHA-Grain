@@ -1,4 +1,4 @@
-INHA Grate 0.4.0 - Windows x64 VST3
+INHA Grate 0.5.0 - Windows x64 VST3
 
 1. Close your DAW.
 2. Copy the entire "INHA Grate.vst3" folder to:

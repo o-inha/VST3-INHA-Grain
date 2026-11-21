@@ -1,7 +1,7 @@
 # INHA Grate
 
 Windows x64 VST3 insert effect for captured granular textures. Development
-version: **0.4.0**. Built on INHA Core 0.1.2 and the native INHA editor family.
+version: **0.5.0**. Built on INHA Core 0.1.2 and the native INHA editor family.
 
 ## Getting started
 
@@ -17,7 +17,8 @@ events without transposing their audio.
 
 ## Controls
 
-Two values under a control are the lower/upper bounds of a seeded random range.
+Two values under a control usually bound a seeded random range. EQ is the
+exception: its two values are fixed low-cut and high-cut frequencies.
 
 | Control | Behavior |
 |---|---|
@@ -35,8 +36,9 @@ Two values under a control are the lower/upper bounds of a seeded random range.
 | UNDULATION SPEED | Duration as a percentage of the event's chosen attack + release; 50% means half their sum, 200% twice it |
 | SWAY AMOUNT | Depth range relative to the current event's base grain size, 0–100%; 20% permits approximately 80–120% of that size |
 | SWAY SPEED | Time range between smooth random targets; independent of event attack/release |
-| DUCK DRY | Attenuates the direct signal while granular events are active |
-| DUCK PRV | Shortens previous events' tails when a new event arrives; disabled in NONE |
+| DUCK WET | Actual dry-input audio ducks the wet effect; 0% off, 100% nearly mutes wet on loud input; default 0% |
+| DUCK PRV | Shortens previous events' tails when a new event arrives; disabled in NONE; default 50% |
+| EQ | Fixed wet-only low/high cutoffs, 20 Hz–20 kHz, 12 dB/octave; full range bypasses both filters |
 | A | Random linear event attack; also trigger lockout/minimum volume-event duration |
 | R | Random curved event release |
 | DRY / WET | Independent output levels; click a label to mute/restore, double-click to reset |
@@ -77,9 +79,10 @@ valid GRAIN division and then drifts smoothly around it; its hidden SWAY is
 continuous so weak movement is not flattened by note-length snapping. The main
 layer continues to follow the selected SYNC divisions.
 
-Layer gains follow **1, 0.85, 0.7225, 0.6141…** before normalization. Every
-layer normalizes its own overlapping windows, and the combined wet signal
-uses the weighted active-layer gain sum to prevent large volume increases.
+Layer gains follow **1, 0.85, 0.7225, 0.6141…**. Every layer normalizes its own
+overlapping windows, then the layers add without overall MASS normalization.
+The primary layer keeps its level. Eight identical layers can sum to about
+**+13.7 dB** before WET adjustment and final peak protection; lower WET to taste.
 Adding/removing layers fades smoothly. Existing layer sequences and the main
 layer's timing/source choices stay independent of the MASS setting.
 Parallel layers can still replay source transients at different times; MASS
@@ -114,23 +117,45 @@ back to a triggered mode restores the stored motion selection. New controls
 are appended to preserve existing automation IDs. Saved 0.1/0.2 states migrate
 stored durations in milliseconds into the new 40 ms–6 second bounds.
 
+## Wet ducking and EQ
+
+DUCK WET listens to the original stereo input before the DRY output fader.
+It uses one linked detector for both channels, preserving the stereo balance.
+Quiet input below roughly -36 dBFS causes no reduction; by -12 dBFS the chosen
+duck depth is fully applied. At 100%, loud dry input nearly mutes the wet
+effect. A fast 3 ms gain attack and 120 ms recovery let the effect return as
+the source becomes quiet. This follows actual audio, independently of event
+envelopes and the WET output level. DRY is not attenuated by this control.
+
+EQ applies only to the summed wet signal. Raise the lower handle to remove
+low frequencies; lower the upper handle to remove high frequencies. The fixed
+cutoffs use 12 dB/octave Butterworth slopes and smooth parameter changes.
+At the default 20 Hz / 20 kHz endpoints both filters are exactly bypassed.
+Neither EQ cutoff is randomized. EQ and ducking work in NONE as well as
+triggered modes. Existing saved duck values are retained when loading older
+states; the new 0% WET / 50% PRV defaults apply to new instances and resets.
+
 ## Capture and texture
 
 - **NONE:** rolling live capture; no event trigger is needed.
-- **TRANSIENTS:** an onset starts a capture at that sample. Detection is locked
-  for the chosen attack duration. The capture fills progressively for BUFFER's
-  duration, then stays frozen for that event's remaining tail.
-- **MIDI NOTES:** accepted note-ons use the same trigger-forward capture.
+- **TRANSIENTS:** an onset starts an event. Detection is locked for the chosen
+  attack duration. The event uses rolling pre-trigger history and keeps
+  recording for a seeded **50–95% of BUFFER** after the trigger, then freezes.
+- **MIDI NOTES:** accepted note-ons use the same seeded capture behavior.
 - **VOLUME:** the effect remains held while the detected input level is above
   THLD, then releases. Attack is the minimum hold duration/retrigger lockout.
 
-Capture is causal: the complete post-trigger buffer cannot exist immediately.
-Grains wait until at least the current minimum duration has been recorded,
-then read a complete, already-written source segment once. The available
-capture grows as input arrives. Long requested grains initially use shorter
-safe segments until enough source has been captured. A short capture is never
-looped inside a longer grain; this prevents the former pitched startup tones.
-Each event owns its capture; later notes do not replace an older event's source audio.
+The remaining 5–50% of the final BUFFER window comes from audio preceding the
+trigger. The hidden capture fraction derives from the main seed and event
+timeline; it adds no user control. Capture continues in the background for
+future events. After its chosen recording interval, an event reads only its
+own frozen source for the rest of its lifetime. Missing prehistory at a fresh
+transport start is known silence, never stale audio. Existing source history
+lets grains start without waiting for an entire BUFFER to fill. Long grains
+still require a complete contiguous source slice; a short slice is never
+looped inside a longer grain, preventing the former pitched startup tones.
+Later triggers cannot overwrite an older event's source. BUFFER changes do
+not restart or extend an already chosen capture interval.
 
 Grains choose seeded random positions. Each layer uses 50% overlap and independent window
 normalization; MASS layers choose independent seeded positions and PAN values.
@@ -151,6 +176,17 @@ start/history. Audio captures and detector histories are live DSP state: seeking
 into the middle of a recording cannot reconstruct audio the plug-in has never
 received. Discontinuous transport and playback restarts reset that history. Use the same preroll for
 identical renders. Refreshing SEED intentionally changes the result.
+
+## Changes in 0.5.0
+
+- Seeded 50–95% post-trigger capture with rolling prehistory, then a frozen
+  BUFFER source for the full event.
+- Additive MASS preserves the primary layer's volume and the 15% layer taper.
+- Audio-driven DUCK WET replaces event-driven dry attenuation; new defaults
+  are WET 0% and PRV 50%.
+- Added fixed wet EQ cutoffs with neutral full-range defaults and 12 dB/octave
+  slopes. Widened the editor and evenly redistributed the top-row spacing.
+- State v5 imports v1–v4 parameters with neutral EQ defaults.
 
 ## Changes in 0.4.0
 

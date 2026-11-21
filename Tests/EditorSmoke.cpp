@@ -338,7 +338,7 @@ Capture capture (const Editor& editor)
 
 void checkRendered (const Capture& image)
 {
-    require (image.width >= 500 && image.height >= 366, "Unexpected editor dimensions");
+    require (image.width >= 546 && image.height >= 366, "Unexpected editor dimensions");
     std::size_t visible = 0, transitions = 0;
     for (std::size_t i=1; i<image.pixels.size(); ++i)
     {
@@ -456,7 +456,7 @@ void motionDefaultReset(Editor& editor)
     editor.doubleClickAt(143,253);expect(11,50);expect(12,200);
     for(ParamID id=25;id<=28;++id)
         require(motionValue(editor,id)==sway[id-25],"Resetting UNDULATION changed the inactive SWAY range");
-    editor.doubleClickAt(212,91);expect(4,2000);
+    editor.doubleClickAt(231,91);expect(4,2000);
 }
 
 void bufferCapAndNewControls(Editor& editor,const std::filesystem::path& directory)
@@ -474,7 +474,7 @@ void bufferCapAndNewControls(Editor& editor,const std::filesystem::path& directo
     const auto pinkValues=[](const Capture& image)
     {
         int pink=0;
-        for(int y=130;y<159;++y)for(int x=249;x<328;++x)
+        for(int y=130;y<159;++y)for(int x=276;x<355;++x)
         {
             const auto colour=image.logicalPixel(x,y);
             // ClearType gives dark text magenta fringes; warning pink is bright.
@@ -495,21 +495,58 @@ void bufferCapAndNewControls(Editor& editor,const std::filesystem::path& directo
     editor.dragAt(61,91,50);
     require(editor.plain("Grain mass")>mass,"MASS knob did not change parallel stream count");
     const auto pan=std::array<double,2>{editor.plain("Grain pan minimum"),editor.plain("Grain pan maximum")};
-    editor.dragAt(439,91,65);
+    editor.dragAt(485,91,65);
     require(editor.plain("Grain pan minimum")!=pan[0]||editor.plain("Grain pan maximum")!=pan[1],
             "PAN range knob did not respond to dragging");
     const auto dry=editor.plain("Dry level"),wet=editor.plain("Wet level");
-    editor.dragAt(410,253,270);editor.dragAt(456,253,270);
+    editor.dragAt(456,253,270);editor.dragAt(502,253,270);
     require(editor.plain("Dry level")<dry&&editor.plain("Wet level")<wet,
             "Bottom DRY/WET sliders did not change output levels");
-    editor.clickAt(458,14);editor.settleFooter();
+    editor.clickAt(504,14);editor.settleFooter();
     require(editor.plain("Tempo sync")==1,"Header SYNC button did not enable tempo synchronization");
     savePreview(editor,directory,L"grate-sync-100.png");
-    editor.clickAt(458,14);editor.settleFooter();
+    editor.clickAt(504,14);editor.settleFooter();
     require(editor.plain("Tempo sync")==0,"Header SYNC button did not disable tempo synchronization");
-    editor.doubleClickAt(61,91);editor.doubleClickAt(439,91);
-    editor.doubleClickAt(410,253);editor.doubleClickAt(456,253);
-    editor.doubleClickAt(212,91);editor.doubleClickAt(288,91);
+    editor.doubleClickAt(61,91);editor.doubleClickAt(485,91);
+    editor.doubleClickAt(456,253);editor.doubleClickAt(502,253);
+    editor.doubleClickAt(231,91);editor.doubleClickAt(315,91);
+}
+
+int colourDistance(COLORREF a,COLORREF b);
+
+void fixedEqControls(Editor& editor,const std::filesystem::path& directory,const std::wstring& prefix)
+{
+    const auto low=editor.parameter("EQ low cut"),high=editor.parameter("EQ high cut");
+    const auto saved=std::array<double,2>{motionValue(editor,low),motionValue(editor,high)};
+    editor.set("EQ low cut",0);editor.set("EQ high cut",1);editor.settleFooter();
+    require(editor.plain("EQ low cut")==20&&editor.plain("EQ high cut")==20000,
+            "Default EQ endpoints were not a neutral full-band range");
+    const auto initial=capture(editor);const auto panel=initial.logicalPixel(390,250);
+    require(colourDistance(initial.logicalPixel(405,223),panel)>40
+            &&colourDistance(initial.logicalPixel(405,283),panel)>40,
+            "Fixed EQ slider did not show separate upper/high-cut and lower/low-cut handles");
+    editor.dragAt(410,283,260);
+    require(editor.plain("EQ low cut")>20&&editor.plain("EQ high cut")==20000,
+            "Lower EQ handle did not edit the low-cut frequency independently");
+    const auto retainedLow=editor.plain("EQ low cut");
+    editor.dragAt(410,223,245);
+    require(editor.plain("EQ high cut")<20000&&editor.plain("EQ low cut")==retainedLow,
+            "Upper EQ handle did not edit the high-cut frequency independently");
+    savePreview(editor,directory,(prefix+L"-eq-active.png").c_str());
+    editor.set("EQ low cut",0.35);editor.set("EQ high cut",0.65);editor.settleFooter();
+    editor.dragAt(410,262,180);
+    require(motionValue(editor,low)<=motionValue(editor,high),"EQ lower handle crossed above its upper handle");
+    editor.set("EQ low cut",0.35);editor.set("EQ high cut",0.65);editor.settleFooter();
+    editor.dragAt(410,244,330);
+    require(motionValue(editor,low)<=motionValue(editor,high),"EQ upper handle crossed below its lower handle");
+    editor.doubleClickAt(410,253);
+    require(editor.plain("EQ low cut")==20&&editor.plain("EQ high cut")==20000,
+            "Double-clicking EQ did not restore both neutral endpoints");
+    for(const auto id:{low,high}){
+        ParameterInfo info{};require(editor.controller->getParameterInfo(id,info)==kResultOk,"Cannot inspect EQ automation parameter");
+        require(info.stepCount==0,"Fixed EQ frequency unexpectedly became a discrete or randomized parameter");
+    }
+    editor.set("EQ low cut",saved[0]);editor.set("EQ high cut",saved[1]);editor.settleFooter();
 }
 
 void noneModeDisablesEventControls(Editor& editor,const std::filesystem::path& directory)
@@ -553,13 +590,13 @@ void tripletControlAppearance(Editor& editor,const std::filesystem::path& direct
     const auto value=[&](ParamID id){return editor.controller->getParamNormalized(id);};
     const auto saved=std::array<double,6>{value(4),value(5),value(6),value(29),value(33),value(34)};
     set(29,0);set(33,0);set(34,0);
-    editor.clickAt(237,45);editor.clickAt(309,45);
+    editor.clickAt(256,45);editor.clickAt(336,45);
     require(value(33)==0&&value(34)==0,"Disabled T buttons remained clickable without SYNC");
-    editor.clickAt(458,14);editor.moveTo(200,330);editor.settleFooter();
+    editor.clickAt(504,14);editor.moveTo(200,330);editor.settleFooter();
     auto inactive=capture(editor);
-    editor.clickAt(237,45);
+    editor.clickAt(256,45);
     require(value(33)==1&&value(34)==0,"BUFFER T button changed the wrong triplet bank");
-    editor.clickAt(309,45);editor.moveTo(200,330);editor.settleFooter();
+    editor.clickAt(336,45);editor.moveTo(200,330);editor.settleFooter();
     require(value(33)==1&&value(34)==1,"GRAIN T button did not enable its independent triplet bank");
     auto active=capture(editor);active.save(directory/(prefix+L"-triplets-on.png"));
     const auto ink=dark?RGB(225,225,224):RGB(16,16,16);
@@ -567,7 +604,7 @@ void tripletControlAppearance(Editor& editor,const std::filesystem::path& direct
     std::array<double,2> labelGaps{};
     for(int index=0;index<2;++index)
     {
-        const int faceLeft=index==0?232:304,centre=index==0?212:288;
+        const int faceLeft=index==0?251:331,centre=index==0?231:315;
         require(active.logicalPixel(faceLeft+1,49)==ink
                 &&inactive.logicalPixel(faceLeft+1,49)==panel,
                 "T button did not use the INHA filled/outlined toggle face");
@@ -586,7 +623,7 @@ void tripletControlAppearance(Editor& editor,const std::filesystem::path& direct
                 "BUFFER/GRAIN label did not retain normal spacing before its T button");
     }
     require(std::abs(labelGaps[0]-labelGaps[1])<=1.5,"BUFFER and GRAIN T buttons use inconsistent label gaps");
-    editor.clickAt(458,14);editor.clickAt(237,45);editor.clickAt(309,45);
+    editor.clickAt(504,14);editor.clickAt(256,45);editor.clickAt(336,45);
     require(value(29)==0&&value(33)==1&&value(34)==1,"Disabling SYNC lost retained triplet settings");
     editor.moveTo(200,330);editor.settleFooter();
     auto disabled=capture(editor);disabled.save(directory/(prefix+L"-triplets-disabled.png"));
@@ -595,7 +632,7 @@ void tripletControlAppearance(Editor& editor,const std::filesystem::path& direct
     const auto pinkValues=[](const Capture& image)
     {
         int count=0;
-        for(int y=130;y<159;++y)for(int x=249;x<328;++x)
+        for(int y=130;y<159;++y)for(int x=276;x<355;++x)
         {
             const auto colour=image.logicalPixel(x,y);
             count+=GetRValue(colour)>180&&GetRValue(colour)>GetGValue(colour)+25
@@ -616,14 +653,14 @@ void tripletControlAppearance(Editor& editor,const std::filesystem::path& direct
 
 void headerAppearance(Editor& editor,const std::filesystem::path& directory,const wchar_t* appearance,bool dark)
 {
-    constexpr int syncLeft=440,syncRight=487,menuLeft=378,menuRight=461;
+    constexpr int syncLeft=486,syncRight=533,menuLeft=424,menuRight=507;
     const auto scale=editor.size().getWidth()>=660?1.5:1.0;
     const auto physical=[&](int value){return static_cast<int>(std::lround(value*scale));};
     const auto savedMode=editor.controller->getParamNormalized(editor.parameter("Trigger mode"));
     const std::wstring prefix=L"grate-header-"+std::wstring(appearance);
     editor.set("Tempo sync",0);editor.moveTo(200,330);editor.settleFooter();
     auto off=capture(editor);off.save(directory/(prefix+L"-sync-off.png"));
-    editor.clickAt(458,14);editor.moveTo(200,330);editor.settleFooter();
+    editor.clickAt(504,14);editor.moveTo(200,330);editor.settleFooter();
     require(editor.plain("Tempo sync")==1,"Header SYNC toggle did not activate");
     auto on=capture(editor);on.save(directory/(prefix+L"-sync-on.png"));
     const auto offBackground=off.logicalPixel(syncLeft+2,4),onBackground=on.logicalPixel(syncLeft+2,4);
@@ -664,7 +701,7 @@ void headerAppearance(Editor& editor,const std::filesystem::path& directory,cons
     const auto rightPadding=syncRight-static_cast<double>(rightmostInk)/scale;
     require(rightPadding>=8&&rightPadding<=13,"SYNC text did not use the normal right-side padding");
 
-    editor.clickAt(458,14);editor.moveTo(439,14);editor.settleFooter();
+    editor.clickAt(504,14);editor.moveTo(485,14);editor.settleFooter();
     require(editor.plain("Tempo sync")==0,"Trigger/SYNC boundary unexpectedly toggled synchronization");
     auto menu=capture(editor);menu.save(directory/(prefix+L"-trigger-menu.png"));
     const auto menuBackground=menu.logicalPixel(menuLeft+2,30);
@@ -691,6 +728,7 @@ void headerAppearance(Editor& editor,const std::filesystem::path& directory,cons
     editor.moveTo(200,330);editor.settleFooter();
     editor.set("Trigger mode",savedMode);
     tripletControlAppearance(editor,directory,prefix,dark);
+    fixedEqControls(editor,directory,prefix);
 }
 
 void testEditor (Module& module, const std::filesystem::path& directory)
@@ -698,9 +736,10 @@ void testEditor (Module& module, const std::filesystem::path& directory)
     {
         Editor editor (*module.factory);
         const auto initial = editor.size();
-        require (initial.getWidth()==750 && initial.getHeight()==549,
+        require (initial.getWidth()==819 && initial.getHeight()==549,
                  "New Grate editor must open at 150 percent");
         require (!preferenceEnabled (L"ThemeDark"), "Isolated preferences did not start light");
+        require(editor.plain("Duck wet")==0&&editor.plain("Duck previous event")==50,"New DUCK defaults did not use WET0/PREV50");
         savePreview (editor,directory,L"grate-light-150.png");
         swayPreview(editor,directory,L"grate-light-sway-150.png");
         headerAppearance(editor,directory,L"light-150",false);
@@ -709,7 +748,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         editor.clickAt (87,footerMiddle);
         require (!preferenceEnabled (L"ThemeDark"), "Collapsed theme action was clickable");
         editor.clickAt (119,footerMiddle);
-        require (editor.size().getWidth()==750, "Collapsed zoom action was clickable");
+        require (editor.size().getWidth()==819, "Collapsed zoom action was clickable");
         expandSettings (editor);
         capture(editor).save(directory/L"grate-settings-150.png");
 
@@ -719,7 +758,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         swayPreview(editor,directory,L"grate-dark-sway-150.png");
         headerAppearance(editor,directory,L"dark-150",true);
         clickSetting(editor,119);
-        require(editor.size().getWidth()==500 && editor.size().getHeight()==366,
+        require(editor.size().getWidth()==546 && editor.size().getHeight()==366,
                 "Settings zoom control did not resize to 100 percent");
         require(editor.frame.resizeCount>0,"Zoom did not notify the host frame");
         savePreview(editor,directory,L"grate-dark-100.png");
@@ -736,26 +775,26 @@ void testEditor (Module& module, const std::filesystem::path& directory)
 
         // Check meaningful controls through Windows messages, as a VST3 host sees them.
         const auto buffer=editor.plain("Capture buffer");
-        editor.dragAt(212,91,70);
+        editor.dragAt(231,91,70);
         require(editor.plain("Capture buffer")>buffer,"BUFFER knob did not respond to upward drag");
         const auto grainMin=editor.plain("Grain minimum"), grainMax=editor.plain("Grain maximum");
-        editor.dragAt(288,91,75);
+        editor.dragAt(315,91,75);
         require(editor.plain("Grain minimum")!=grainMin || editor.plain("Grain maximum")!=grainMax,
                 "GRAIN range knob did not respond to drag");
         require(editor.plain("Grain minimum")<=editor.plain("Grain maximum"),"Range handles crossed");
         motionDefaultReset(editor);
 
-        editor.moveTo(390,14);editor.settleFooter();editor.clickAt(390,14);editor.settleFooter();
-        editor.clickAt(390,104);editor.settleFooter();
+        editor.moveTo(436,14);editor.settleFooter();editor.clickAt(436,14);editor.settleFooter();
+        editor.clickAt(436,104);editor.settleFooter();
         require(editor.plain("Trigger mode")==3,"Trigger dropdown did not select VOLUME");
         const auto threshold=editor.plain("Volume threshold");
-        editor.dragAt(137,91,70);
+        editor.dragAt(146,91,70);
         require(editor.plain("Volume threshold")>threshold,"THLD control did not edit volume threshold");
         savePreview(editor,directory,L"grate-volume-100.png");
     }
     // Recreating the view loads the same per-user zoom and theme choices.
     Editor reopened(*module.factory);
-    require(reopened.size().getWidth()==500 && !preferenceEnabled(L"ThemeDark"),
+    require(reopened.size().getWidth()==546 && !preferenceEnabled(L"ThemeDark"),
             "New editor instance did not retain its appearance preferences");
 }
 }

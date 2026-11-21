@@ -91,10 +91,10 @@ constexpr TUID controllerCID = INLINE_UID (0x494E4841, 0x47524154, 0x45435431, 0
 enum Parameter : ParamID {
  triggerMode, amount, sensitivity, threshold, scatter, grainMinimum, grainMaximum,
  envMinimum, envMaximum, undulationMinimum, undulationMaximum, speedMinimum, speedMaximum,
- attackMinimum, attackMaximum, releaseMinimum, releaseMaximum, duckDry, duckPrevious,
+ attackMinimum, attackMaximum, releaseMinimum, releaseMaximum, duckWet, duckPrevious,
  dryLevel, wetLevel, seedHigh, seedLow, bypass,
  motionMode, swayAmountMinimum, swayAmountMaximum, swaySpeedMinimum, swaySpeedMaximum,
- tempoSync, mass, panMinimum, panMaximum, bufferTriplets, grainTriplets, parameterCount
+ tempoSync, mass, panMinimum, panMaximum, bufferTriplets, grainTriplets, eqLowCutHz, eqHighCutHz, parameterCount
 };
 struct ParamSpec { const char* title; const char* shortTitle; const char* unit;
  double minimum, maximum, defaultValue; bool time; };
@@ -116,8 +116,8 @@ constexpr std::array<ParamSpec,parameterCount> specs {{
  {"Event attack maximum","Attack max","ms",40,6000,1000,true},
  {"Event release minimum","Release min","ms",40,6000,800,true},
  {"Event release maximum","Release max","ms",40,6000,6000,true},
- {"Duck dry","Duck dry","%",0,100,90,false},
- {"Duck previous event","Duck previous","%",0,100,90,false},
+ {"Duck wet","Duck wet","%",0,100,0,false},
+ {"Duck previous event","Duck previous","%",0,100,50,false},
  {"Dry level","Dry","dB",-60,6,0,false},
  {"Wet level","Wet","dB",-60,6,0,false},
  {"Seed high word","Seed high","",0,65535,3887,false},
@@ -133,7 +133,9 @@ constexpr std::array<ParamSpec,parameterCount> specs {{
  {"Grain pan minimum","Pan min","%",-100,100,0,false},
  {"Grain pan maximum","Pan max","%",-100,100,0,false},
  {"Buffer triplets","Buffer T","",0,1,0,false},
- {"Grain triplets","Grain T","",0,1,0,false}
+ {"Grain triplets","Grain T","",0,1,0,false},
+ {"EQ low cut","EQ low","Hz",20,20000,20,false},
+ {"EQ high cut","EQ high","Hz",20,20000,20000,false}
 }};
 bool iidEqual (const TUID a, const TUID b) noexcept
 {
@@ -185,11 +187,13 @@ double quantizeNormal(ParamID id,double x) noexcept {
 }
 double toPlain(ParamID id,double x) noexcept {
  if(id>=parameterCount) return 0; x=quantizeNormal(id,x); const auto& p=specs[id];
+ if(id==eqLowCutHz||id==eqHighCutHz)return 20.0*std::pow(1000.0,x);
  if(p.time) x=x*x*x;
  return p.minimum+(p.maximum-p.minimum)*x;
 }
 double toNormal(ParamID id,double x) noexcept {
  if(id>=parameterCount) return 0; const auto& p=specs[id];
+ if(id==eqLowCutHz||id==eqHighCutHz)return clampNormal(std::log(std::clamp(std::isfinite(x)?x:20.0,20.0,20000.0)/20.0)/std::log(1000.0));
  x=clampNormal((x-p.minimum)/(p.maximum-p.minimum));
  return quantizeNormal(id,p.time?std::cbrt(x):x);
 }
@@ -209,6 +213,12 @@ std::wstring displayValue(ParamID id,double value) {
   if(value<=-59.9) return L"-INF";
   std::swprintf(text,64,L"%.1f dB",value);
  } else if(id==threshold) std::swprintf(text,64,L"%.1f dB",value);
+ else if(id==eqLowCutHz||id==eqHighCutHz){
+  if(value<999.5)std::swprintf(text,64,L"%.0f Hz",value);
+  else {std::swprintf(text,64,L"%.1f",value/1000.0);std::wstring frequency=text;
+   if(frequency.size()>=2&&frequency.compare(frequency.size()-2,2,L".0")==0)frequency.resize(frequency.size()-2);
+   return frequency+L" kHz";}
+ }
  else if(id==undulationMinimum || id==undulationMaximum) std::swprintf(text,64,L"%+.0f%%",value);
  else if(id==mass) std::swprintf(text,64,L"%.0fx",value);
  else if(id==panMinimum || id==panMaximum) {
@@ -218,12 +228,12 @@ std::wstring displayValue(ParamID id,double value) {
  else std::swprintf(text,64,L"%.0f%%",value);
  return text;
 }
-struct SavedStateHeader { std::uint32_t magic=0x47524154u,version=4; };
-constexpr std::size_t stateV1ParameterCount = 24, stateV2ParameterCount = 29, stateV3ParameterCount = 33;
-static_assert (bypass == 23 && motionMode == stateV1ParameterCount && tempoSync == stateV2ParameterCount && bufferTriplets == stateV3ParameterCount && parameterCount == 35);
+struct SavedStateHeader { std::uint32_t magic=0x47524154u,version=5; };
+constexpr std::size_t stateV1ParameterCount = 24, stateV2ParameterCount = 29, stateV3ParameterCount = 33, stateV4ParameterCount = 35;
+static_assert (bypass == 23 && motionMode == stateV1ParameterCount && tempoSync == stateV2ParameterCount && bufferTriplets == stateV3ParameterCount && eqLowCutHz == stateV4ParameterCount && parameterCount == 37);
 constexpr std::size_t maximumAutomationPoints=2048;
 using ParameterTimeline=InhaAutomation::Timeline<parameterCount,maximumAutomationPoints>;
-constexpr int sidePanelLogicalWidth=13, contentEditorWidth=474, contentLeft=13,
+constexpr int sidePanelLogicalWidth=13, contentEditorWidth=520, contentLeft=13,
  contentRight=contentLeft+contentEditorWidth, baseEditorWidth=contentEditorWidth+26,
  headerHeight=28, footerHeight=29, controlsBottom=337, baseEditorHeight=controlsBottom+footerHeight,
  zoomedEditorWidth=baseEditorWidth*3/2, zoomedEditorHeight=baseEditorHeight*3/2,
@@ -246,27 +256,28 @@ constexpr std::array<RECT,2> motionTabRects{{
  {contentLeft+8,174,contentLeft+120,196},
  {contentLeft+120,174,contentLeft+177,196}
 }};
-constexpr RECT bufferTripletToggleBounds{212+16,38,212+34,52};
-constexpr RECT bufferTripletToggleFace{212+20,40,212+30,51};
-constexpr RECT grainTripletToggleBounds{288+12,38,288+30,52};
-constexpr RECT grainTripletToggleFace{288+16,40,288+26,51};
+constexpr RECT bufferTripletToggleBounds{231+16,38,231+34,52};
+constexpr RECT bufferTripletToggleFace{231+20,40,231+30,51};
+constexpr RECT grainTripletToggleBounds{315+12,38,315+30,52};
+constexpr RECT grainTripletToggleFace{315+16,40,315+26,51};
 constexpr ParamID symmetricRangeDrag=parameterCount+1,translateRangeDrag=parameterCount+2,pendingRangeDrag=parameterCount+3;
 struct Control {ParamID minimum,maximum;int x,y;const wchar_t* label;bool slider;};
-constexpr std::array<Control,14> controls{{
+constexpr std::array<Control,15> controls{{
  {mass,parameterCount,contentLeft+48,91,L"MASS",false},
- {amount,parameterCount,contentLeft+124,91,L"AMOUNT",false},
- {scatter,parameterCount,contentLeft+199,91,L"BUFFER",false},
- {grainMinimum,grainMaximum,contentLeft+275,91,L"GRAIN",false},
- {envMinimum,envMaximum,contentLeft+350,91,L"ENV",false},
- {panMinimum,panMaximum,contentLeft+426,91,L"PAN",false},
+ {amount,parameterCount,contentLeft+133,91,L"AMOUNT",false},
+ {scatter,parameterCount,contentLeft+218,91,L"BUFFER",false},
+ {grainMinimum,grainMaximum,contentLeft+302,91,L"GRAIN",false},
+ {envMinimum,envMaximum,contentLeft+387,91,L"ENV",false},
+ {panMinimum,panMaximum,contentLeft+472,91,L"PAN",false},
  {undulationMinimum,undulationMaximum,contentLeft+48,253,L"AMOUNT",false},
  {speedMinimum,speedMaximum,contentLeft+130,253,L"SPEED",false},
  {attackMinimum,attackMaximum,contentLeft+207,253,L"A",true},
  {releaseMinimum,releaseMaximum,contentLeft+250,253,L"R",true},
- {duckDry,parameterCount,contentLeft+301,253,L"DRY",true},
+ {duckWet,parameterCount,contentLeft+301,253,L"WET",true},
  {duckPrevious,parameterCount,contentLeft+339,253,L"PRV",true},
- {dryLevel,parameterCount,contentLeft+397,253,L"DRY",true},
- {wetLevel,parameterCount,contentLeft+443,253,L"WET",true}
+ {eqLowCutHz,eqHighCutHz,contentLeft+397,253,L"EQ",true},
+ {dryLevel,parameterCount,contentLeft+443,253,L"DRY",true},
+ {wetLevel,parameterCount,contentLeft+489,253,L"WET",true}
 }};
 class PluginInstance;
 class NativeView final : public IPlugView
@@ -543,6 +554,7 @@ public:
   }
   char* end=nullptr;auto value=std::strtod(b,&end);if(end==b||!std::isfinite(value))return kResultFalse;
   while(*end==' ')++end;if(specs[id].time&&(*end=='s'||*end=='S'))value*=1000;
+  if((id==eqLowCutHz||id==eqHighCutHz)&&(*end=='k'||*end=='K'))value*=1000.0;
   if(id==panMinimum||id==panMaximum){if(*end=='l'||*end=='L')value=-std::abs(value);else if(*end=='r'||*end=='R')value=std::abs(value);}
   normalized=plainParamToNormalized(id,value);return kResultOk;
  }
@@ -744,10 +756,10 @@ public:
 private:
  tresult readState(IBStream* stream){
   if(!stream)return kInvalidArgument;SavedStateHeader h{};int32 bytes=0;
-  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||(h.magic!=0x47524154u&&h.magic!=0x47524149u)||(h.version!=1&&h.version!=2&&h.version!=3&&h.version!=4))return kResultFalse;
+  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||(h.magic!=0x47524154u&&h.magic!=0x47524149u)||(h.version!=1&&h.version!=2&&h.version!=3&&h.version!=4&&h.version!=5))return kResultFalse;
   std::array<double,parameterCount> p{};
   for(ParamID id=0;id<parameterCount;++id)p[id]=defaultStateNormalized(id);
-  const auto count=h.version==1?stateV1ParameterCount:h.version==2?stateV2ParameterCount:h.version==3?stateV3ParameterCount:static_cast<std::size_t>(parameterCount);
+  const auto count=h.version==1?stateV1ParameterCount:h.version==2?stateV2ParameterCount:h.version==3?stateV3ParameterCount:h.version==4?stateV4ParameterCount:static_cast<std::size_t>(parameterCount);
   const int32 size=static_cast<int32>(count*sizeof(double));
   if(stream->read(p.data(),size,&bytes)!=kResultOk||bytes!=size)return kResultFalse;
   if(h.version<3)for(ParamID id=0;id<count;++id)if(specs[id].time){
@@ -862,7 +874,8 @@ private:
   result.undulationMinPercent=v(undulationMinimum);result.undulationMaxPercent=v(undulationMaximum);
   result.speedMinPercent=v(speedMinimum);result.speedMaxPercent=v(speedMaximum);
   result.attackMinMs=v(attackMinimum);result.attackMaxMs=v(attackMaximum);result.releaseMinMs=v(releaseMinimum);result.releaseMaxMs=v(releaseMaximum);
-  result.duckDryPercent=v(duckDry);result.duckPreviousPercent=result.mode==0?0:v(duckPrevious);result.dryDb=v(dryLevel);result.wetDb=v(wetLevel);
+  result.duckWetPercent=v(duckWet);result.duckPreviousPercent=result.mode==0?0:v(duckPrevious);result.dryDb=v(dryLevel);result.wetDb=v(wetLevel);
+  result.eqLowCutHz=v(eqLowCutHz);result.eqHighCutHz=v(eqHighCutHz);
   result.mass=static_cast<int>(std::lround(v(mass)));result.panMinPercent=v(panMinimum);result.panMaxPercent=v(panMaximum);
   result.seed=seedFromValues(p);result.bypass=v(bypass)>=0.5;return result;
  }
@@ -1385,6 +1398,19 @@ void NativeView::updateFooterTooltips()
         if (!create)
             SendMessageW (footerTooltips, TTM_UPDATETIPTEXTW, 0,
                           reinterpret_cast<LPARAM> (&tool));
+    }
+    const std::array<std::pair<RECT,const wchar_t*>,2> signalTooltips{{
+        {{393,196,427,319},L"EQ: fixed cutoff frequencies for granular output. The lower handle removes lows; the upper handle removes highs. The full 20 Hz to 20 kHz range bypasses EQ. These settings do not randomize."},
+        {{297,196,331,319},L"DUCK WET: input audio turns down the granular output. Input silence lets the granular tail recover. PRV separately fades older triggered events."}
+    }};
+    for(std::size_t index=0;index<signalTooltips.size();++index){
+        const auto& item=signalTooltips[index];TOOLINFOW tool{};
+        tool.cbSize=sizeof(tool);tool.uFlags=TTF_SUBCLASS;tool.hwnd=window;
+        tool.uId=static_cast<UINT_PTR>(200+index);
+        tool.rect={scaled(item.first.left),scaled(item.first.top),scaled(item.first.right),scaled(item.first.bottom)};
+        tool.lpszText=const_cast<wchar_t*>(item.second);
+        SendMessageW(footerTooltips,create?TTM_ADDTOOLW:TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&tool));
+        if(!create)SendMessageW(footerTooltips,TTM_UPDATETIPTEXTW,0,reinterpret_cast<LPARAM>(&tool));
     }
 }
 
@@ -2168,7 +2194,7 @@ void NativeView::paint (HDC windowDC)
       const auto effectiveB=grainRange?std::max(effectiveGrain(lo),effectiveGrain(hi)):b;
       const auto pink=darkTheme?RGB(255,108,168):RGB(220,48,116);
       const auto bg=c.minimum==undulationMinimum||c.minimum==speedMinimum?undulationPanel:
-        c.minimum==duckDry||c.minimum==duckPrevious?duckPanel:panel;
+        c.minimum==duckWet||c.minimum==duckPrevious?duckPanel:panel;
       if(!c.slider){
        if(ranged)fillSector(dc,c.x,c.y,radius-1,effectiveA,effectiveB,rangeFill);
        arc(dc,c.x,c.y,radius,0,1,secondary,1.0f);
@@ -2202,6 +2228,7 @@ void NativeView::paint (HDC windowDC)
        auto value=synced&&specs[id].time?std::wstring(InhaGrate::Timing::syncLabel(effective,allowTriplets(id)))
          :displayValue(id,grainRange?std::min(plain(id),plain(scatter)):plain(id));
        if(id==dryLevel||id==wetLevel){const auto space=value.find(L' ');if(space!=std::wstring::npos)value.resize(space);}
+       if(id==eqLowCutHz||id==eqHighCutHz){const auto space=value.find(L' ');if(space!=std::wstring::npos)value.erase(space,1);}
        if(c.slider&&specs[id].time&&!synced){
         wchar_t duration[32]{};
         const auto milliseconds=plain(id);
@@ -2216,7 +2243,7 @@ void NativeView::paint (HDC windowDC)
        }
        return value;
       };
-      const auto controlValueFont=c.slider&&specs[lo].time&&synced?syncedSliderValueFont:valueFont;
+      const auto controlValueFont=c.minimum==eqLowCutHz?smallFont:c.slider&&specs[lo].time&&synced?syncedSliderValueFont:valueFont;
       text(dc,controlValueFont,grainRange&&resolvedTime(lo)>resolvedTime(scatter)+1e-6?pink:primary,compact(lo),{c.x-half,c.y+39,c.x+half,c.y+51},DT_CENTER|DT_VCENTER);
       const auto second=ranged?compact(hi):c.minimum==amount&&mode==2?std::wstring(L"/ NOTE"):(c.minimum==dryLevel||c.minimum==wetLevel)?std::wstring(L"dB"):std::wstring{};
       text(dc,controlValueFont,grainRange&&resolvedTime(hi)>resolvedTime(scatter)+1e-6?pink:primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);

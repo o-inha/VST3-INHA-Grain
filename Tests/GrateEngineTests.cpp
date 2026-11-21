@@ -126,6 +126,30 @@ struct GrateEngineTestAccess {
         }
         return true;
     }
+    struct CaptureState {
+        bool active = false, held = false;
+        std::uint64_t limit = 0, written = 0, post = 0, history = 0, copied = 0, zeros = 0;
+    };
+    static CaptureState captureState(const GrateEngine& engine) {
+        for (const auto& event : engine.events_)
+            if (event.active)
+                return { true, event.held, event.captureLimit, event.written, event.capturePostFrames,
+                         event.historyCount, event.historyCopied, event.historyZeroFrames };
+        return {};
+    }
+    static std::array<float, 2> captureFrame(const GrateEngine& engine, std::uint64_t frame) {
+        for (const auto& event : engine.events_)
+            if (event.active) return { engine.readSample(event, frame, 0), engine.readSample(event, frame, 1) };
+        return {};
+    }
+    static bool minimumGrainFrames(const GrateEngine& engine, std::uint32_t minimum) {
+        for (const auto& event : engine.events_)
+            if (event.active)
+                for (const auto& grain : event.grains)
+                    if (grain.active && grain.duration < minimum) return false;
+        return true;
+    }
+    static std::size_t historyCapacity(const GrateEngine& engine) { return engine.capacity_; }
     static Parameters parameters(const GrateEngine& engine) { return engine.parameters_; }
     static float swayAt(const GrateEngine& engine, std::int64_t sample) {
         return engine.swayValue(sample);
@@ -167,7 +191,7 @@ Parameters base() {
     p.attackMaxMs = 45.0;
     p.releaseMinMs = 300.0;
     p.releaseMaxMs = 550.0;
-    p.duckDryPercent = 0.0;
+    p.duckWetPercent = 0.0;
     p.duckPreviousPercent = 0.0;
     p.dryDb = -60.0;
     p.wetDb = 0.0;
@@ -304,6 +328,89 @@ void testFrozenCaptureAndLiveCapture() {
     CHECK(recovery > 1.0e-3, "NONE resumes immediately when fresh input returns");
 }
 
+void testSeededPrehistoryAndPostTriggerCapture() {
+    using Access = InhaGrate::GrateEngineTestAccess;
+    constexpr int lowRate = 8000;
+    constexpr std::uint64_t bufferFrames = 640; // 80 ms.
+    GrateEngine e;
+    e.prepare(lowRate);
+    const auto inputAt = [](int frame) {
+        return std::array<float, 2> { 0.02f + frame * 0.000001f, -0.03f - frame * 0.000002f };
+    };
+    const auto same = [](const std::array<float, 2>& a, const std::array<float, 2>& b) {
+        return std::abs(a[0] - b[0]) < 0.0000001f && std::abs(a[1] - b[1]) < 0.0000001f;
+    };
+    const auto capture = [&](int warmup, std::uint32_t seed, bool overwriteHistory) {
+        auto p = base(); p.mode = 2; p.scatterMs = 80; p.seed = seed;
+        p.thresholdDb = -60; p.attackMinMs = p.attackMaxMs = 40;
+        p.grainMinMs = p.grainMaxMs = 40;
+        e.setParameters(p); e.reset(456789);
+        const auto memory = e.memoryBytes();
+        callbackAllocations = 0;
+        trackAllocation = true;
+        for (int n = 0; n < warmup; ++n) {
+            const auto sample = inputAt(n); e.process(sample[0], sample[1]);
+        }
+        p.mode = 3; e.setParameters(p);
+        const auto trigger = inputAt(warmup); e.process(trigger[0], trigger[1]);
+        const auto initial = Access::captureState(e);
+        const auto prefix = bufferFrames - initial.post;
+        bool exact = initial.active && initial.held && initial.limit == bufferFrames &&
+            initial.post >= 320 && initial.post <= 608 && initial.history == std::min<std::uint64_t>(prefix, warmup) &&
+            initial.zeros + initial.history == prefix && initial.written == prefix + 1;
+        for (std::uint64_t n = 0; n < prefix; ++n) {
+            const auto expected = n < initial.zeros ? std::array<float, 2>{} :
+                inputAt(warmup - static_cast<int>(initial.history) + static_cast<int>(n - initial.zeros));
+            exact = exact && same(Access::captureFrame(e, n), expected);
+        }
+        exact = exact && same(Access::captureFrame(e, prefix), trigger);
+        for (std::uint64_t n = 1; n < initial.post; ++n) {
+            if (n == initial.post / 3) { p.scatterMs = 160; e.setParameters(p); }
+            if (n + 1 == initial.post)
+                exact = exact && Access::captureState(e).written == bufferFrames - 1;
+            const auto sample = inputAt(warmup + static_cast<int>(n)); e.process(sample[0], sample[1]);
+        }
+        const auto frozen = Access::captureState(e);
+        exact = exact && frozen.written == bufferFrames && frozen.limit == bufferFrames &&
+            frozen.copied == frozen.history && frozen.post == initial.post;
+        for (std::uint64_t n = 0; n < bufferFrames; ++n) {
+            std::array<float, 2> expected {};
+            if (n >= prefix) expected = inputAt(warmup + static_cast<int>(n - prefix));
+            else if (n >= initial.zeros)
+                expected = inputAt(warmup - static_cast<int>(initial.history) + static_cast<int>(n - initial.zeros));
+            exact = exact && same(Access::captureFrame(e, n), expected);
+        }
+        const auto remaining = overwriteHistory ? Access::historyCapacity(e) + 17 : 1000;
+        p.scatterMs = 320; e.setParameters(p);
+        for (std::size_t n = 0; n < remaining; ++n) e.process(0.6f, -0.7f);
+        const auto after = Access::captureState(e);
+        exact = exact && after.active && after.held && after.written == bufferFrames && after.post == initial.post;
+        for (std::uint64_t n = 0; n < bufferFrames; ++n) {
+            std::array<float, 2> expected {};
+            if (n >= prefix) expected = inputAt(warmup + static_cast<int>(n - prefix));
+            else if (n >= initial.zeros)
+                expected = inputAt(warmup - static_cast<int>(initial.history) + static_cast<int>(n - initial.zeros));
+            exact = exact && same(Access::captureFrame(e, n), expected);
+        }
+        trackAllocation = false;
+        CHECK(exact, "trigger capture combines exact stereo prehistory and50..95percent post body, then freezes despite BUFFER/input changes");
+        CHECK(callbackAllocations.load() == 0 && e.memoryBytes() == memory,
+              "history recording and incremental prefix staging never allocate or expand audio-thread memory");
+        return initial.post;
+    };
+    for (const int warmup : { 0, 3, 80, 1500, static_cast<int>(Access::historyCapacity(e)) + 3 }) {
+        const auto first = capture(warmup, 1234567, warmup == 1500);
+        const auto restarted = capture(warmup, 1234567, false);
+        CHECK(first == restarted, "capture split repeats after reset regardless of dirty history contents");
+    }
+    std::uint64_t minimumPost = bufferFrames, maximumPost = 0;
+    for (std::uint32_t seed = 1; seed <= 24; ++seed) {
+        const auto post = capture(1500, seed, false);
+        minimumPost = std::min(minimumPost, post); maximumPost = std::max(maximumPost, post);
+    }
+    CHECK(maximumPost > minimumPost + 100, "the main seed varies post-trigger capture across the allowed fraction range");
+}
+
 void testVolumeHoldAndRelease() {
     GrateEngine e;
     e.prepare(rate);
@@ -351,29 +458,50 @@ void testTransientSilenceAndLockout() {
     CHECK(maximum == 1, "TRANSIENTS starts exactly one event during the attack lockout");
 }
 
-void testDryDuckingAndBypass() {
-    GrateEngine e;
-    e.prepare(rate);
+void testWetDuckingAndBypass() {
+    GrateEngine reference, duck;
+    reference.prepare(rate); duck.prepare(rate);
     auto p = base();
-    p.dryDb = 0.0;
-    p.wetDb = -60.0;
-    p.duckDryPercent = 100.0;
-    p.attackMinMs = p.attackMaxMs = 10.0;
-    p.releaseMinMs = p.releaseMaxMs = 500.0;
-    e.setParameters(p); e.reset();
-    for (int n = 0; n < static_cast<int>(rate * 0.1); ++n) e.process(0.2f, 0.2f);
-    e.noteOn();
-    double ducked = 0.0;
-    for (int n = 0; n < static_cast<int>(rate * 0.15); ++n) {
-        const auto out = e.process(0.2f, 0.2f);
-        if (n > rate * 0.04 && n < rate * 0.08) ducked += std::abs(out[0]);
+    p.scatterMs = 200.0f;
+    p.grainMinMs = p.grainMaxMs = 40.0f;
+    p.attackMinMs = p.attackMaxMs = 40.0f;
+    p.releaseMinMs = p.releaseMaxMs = 3000.0f;
+    p.duckPreviousPercent = 0.0f;
+    p.dryDb = -60.0f; p.wetDb = 0.0f;
+    p.duckWetPercent = 0.0f;
+    reference.setParameters(p); reference.reset();
+    p.duckWetPercent = 100.0f;
+    duck.setParameters(p); duck.reset();
+    for (int n = 0; n < static_cast<int>(rate * 0.3); ++n) {
+        reference.process(0.05f, -0.025f); duck.process(0.05f, -0.025f);
     }
-    const auto average = ducked / (rate * 0.04);
-    CHECK(average < 0.12, "DUCK DRY attenuates the dry signal during the wet event");
-    p.bypass = true;
-    e.setParameters(p);
+    reference.noteOn(); duck.noteOn();
+    double loudReference = 0.0, loudDucked = 0.0;
+    double tailReference = 0.0, tailDucked = 0.0;
+    for (int n = 0; n < static_cast<int>(rate * 1.5); ++n) {
+        const float input = n < rate * 0.35 ? 0.05f : n < rate * 0.65 ? 0.5f : 0.0f;
+        const auto r = reference.process(input, -input * 0.5f);
+        const auto d = duck.process(input, -input * 0.5f);
+        if (n > rate * 0.4 && n < rate * 0.6) {
+            loudReference += r[0] * r[0]; loudDucked += d[0] * d[0];
+        }
+        if (n > rate * 1.25 && n < rate * 1.45) {
+            tailReference += r[0] * r[0]; tailDucked += d[0] * d[0];
+        }
+    }
+    CHECK(loudReference > 0.01 && loudDucked < loudReference * 0.0001,
+          "100percent DUCK WET nearly mutes frozen wet texture when actual dry input is loud");
+    CHECK(tailReference > 0.001 && tailDucked > tailReference * 0.95,
+          "wet texture recovers as actual dry input becomes silent while its event remains active");
+    p.dryDb = 0.0f; p.wetDb = -60.0f;
+    duck.setParameters(p);
     std::array<float, 2> last {};
-    for (int n = 0; n < static_cast<int>(rate * 0.15); ++n) last = e.process(0.2f, -0.13f);
+    for (int n = 0; n < static_cast<int>(rate * 0.15); ++n) last = duck.process(0.5f, -0.3f);
+    CHECK(std::abs(last[0] - 0.5f) < 2.0e-6f && std::abs(last[1] + 0.3f) < 2.0e-6f,
+          "input-driven DUCK never attenuates the direct stereo signal");
+    p.bypass = true;
+    duck.setParameters(p);
+    for (int n = 0; n < static_cast<int>(rate * 0.15); ++n) last = duck.process(0.2f, -0.13f);
     CHECK(std::abs(last[0] - 0.2f) < 1.0e-5f && std::abs(last[1] + 0.13f) < 1.0e-5f,
           "smoothed bypass settles to unchanged stereo dry audio");
 }
@@ -415,7 +543,10 @@ void testEventEnvelopeShape() {
     p.releaseMinMs = p.releaseMaxMs = 400.0;
     p.grainMinMs = p.grainMaxMs = 20.0;
     p.envMinPercent = p.envMaxPercent = 0.0;
-    e.setParameters(p); e.reset(); e.noteOn();
+    e.setParameters(p); e.reset();
+    // A constant pre-trigger history keeps this an envelope-only measurement.
+    for (int n = 0; n < static_cast<int>(rate * 0.1); ++n) e.process(0.2f, 0.2f);
+    e.noteOn();
     std::array<double, 7> amplitudes {};
     for (int n = 0; n < static_cast<int>(rate * 0.8); ++n) {
         const auto out = e.process(0.2f, 0.2f);
@@ -512,20 +643,25 @@ void testTriggerDoesNotManufactureTinyLoopTones() {
     p.duckPreviousPercent = 0.0f;
     const int total = static_cast<int>(rate * 0.4);
     std::vector<float> noise(static_cast<std::size_t>(total)), tone(noise.size());
-    bool slices = true, silentBeforeCapture = true;
+    bool slices = true, minimumGrains = true;
     for (int kind = 0; kind < 2; ++kind) {
-        e.setParameters(p); e.reset(1234567); e.noteOn();
+        e.setParameters(p); e.reset(1234567);
         std::uint32_t randomState = 0x217564a3u;
-        for (int n = 0; n < total; ++n) {
+        // The source now includes pre-trigger context. Supply real continuing
+        // audio so this measures the onset's pitch rather than startup silence.
+        for (int n = -static_cast<int>(rate * 1.1); n < total; ++n) {
+            if (n == 0) e.noteOn();
             randomState ^= randomState << 13; randomState ^= randomState >> 17;
             randomState ^= randomState << 5;
             const auto input = kind == 0
                 ? (static_cast<float>(randomState >> 8) / 8388608.0f - 1.0f) * 0.15f
                 : static_cast<float>(0.15 * std::sin(2.0 * pi * 437.0 * n / rate));
             const auto out = e.process(input, input);
-            (kind == 0 ? noise : tone)[static_cast<std::size_t>(n)] = out[0];
-            slices = slices && Access::validSlices(e);
-            if (n < rate * 0.04) silentBeforeCapture = silentBeforeCapture && out[0] == 0.0f;
+            if (n >= 0) {
+                (kind == 0 ? noise : tone)[static_cast<std::size_t>(n)] = out[0];
+                slices = slices && Access::validSlices(e);
+                minimumGrains = minimumGrains && Access::minimumGrainFrames(e, static_cast<std::uint32_t>(rate * 0.04));
+            }
         }
     }
     const int begin = static_cast<int>(rate * 0.06), end = static_cast<int>(rate * 0.3);
@@ -535,7 +671,7 @@ void testTriggerDoesNotManufactureTinyLoopTones() {
     for (int lag = static_cast<int>(rate * 0.0025); lag <= rate * 0.005; ++lag)
         noiseCorrelation = std::max(noiseCorrelation, std::abs(lagCorrelation(noise, begin, end, lag)));
     const auto toneCorrelation = lagCorrelation(tone, begin, end, static_cast<int>(std::lround(rate / 437.0)));
-    CHECK(silentBeforeCapture, "new triggers wait for safe source capture instead of looping their first 5 ms");
+    CHECK(minimumGrains, "triggered grains retain safe contiguous source durations instead of looping startup snippets");
     CHECK(slices, "every active grain reads a contiguous fully written source slice without internal wrapping");
     CHECK(std::abs(noiseCorrelation) < 0.25,
           "triggered broadband noise has no artificial stationary short-capture repetition tone");
@@ -563,29 +699,33 @@ void testMassPanAndCaptureBoundaries() {
     p.panMinPercent = p.panMaxPercent = 100.0f;
     right.setParameters(p); right.reset();
     bool bounded = true, slices = true, stereo = true, correctSides = true;
+    double additiveGain = 0.0;
+    for (int layer = 0; layer < 8; ++layer) additiveGain += std::pow(0.85, layer);
     double levelDifference = 0.0;
     std::size_t peakGrains = 0;
     callbackAllocations = 0;
     trackAllocation = true;
     for (int n = 0; n < 8000 * 27; ++n) {
-        const auto a = single.process(0.2f, -0.1f);
-        const auto b = dense.process(0.2f, -0.1f);
-        const auto l = left.process(0.2f, -0.1f);
-        const auto r = right.process(0.2f, -0.1f);
+        // Stay below the final safety knee to measure actual additive gain.
+        const auto a = single.process(0.02f, -0.01f);
+        const auto b = dense.process(0.02f, -0.01f);
+        const auto l = left.process(0.02f, -0.01f);
+        const auto r = right.process(0.02f, -0.01f);
         const auto active = Access::activeGrains(dense);
         peakGrains = std::max(peakGrains, active);
         bounded = bounded && active <= GrateEngine::maxGrainsPerEvent;
         slices = slices && Access::validSlices(dense);
-        if (n > 800) {
-            levelDifference = std::max(levelDifference, static_cast<double>(std::abs(a[0] - b[0])));
-            stereo = stereo && std::abs(b[0] - 0.2f) < 0.002f && std::abs(b[1] + 0.1f) < 0.002f;
+        if (n > 2400) {
+            levelDifference = std::max(levelDifference, std::abs(a[0] * additiveGain - b[0]));
+            stereo = stereo && std::abs(b[0] - 0.02 * additiveGain) < 0.00001 &&
+                std::abs(b[1] + 0.01 * additiveGain) < 0.00001;
             correctSides = correctSides && std::abs(l[1]) < 1.0e-6f && std::abs(r[0]) < 1.0e-6f;
         }
     }
     trackAllocation = false;
     CHECK(peakGrains >= 12 && bounded, "MASS8 creates parallel overlapping streams within the fixed grain budget");
-    CHECK(levelDifference < 0.002 && stereo,
-          "increasing centered MASS preserves stereo channels and the original constant-input level");
+    CHECK(levelDifference < 0.00001 && stereo,
+          "MASS8 adds the exact sum of85percent layer weights while preserving stereo channel proportions");
     CHECK(correctSides, "PAN range endpoints pan individual grains fully to the selected stereo side");
     CHECK(slices, "live grains remain within written history after the capture ring wraps");
     CHECK(callbackAllocations.load() == 0, "MASS8 and PAN rendering allocate no audio-thread memory");
@@ -716,7 +856,8 @@ void testMassSwayProfilesAndLayerWeights() {
     auto mainOnly = e;
     Access::isolateLayer(mainOnly, 0);
     const auto reference = mainOnly.process(0.2f, -0.1f);
-    bool weights = reference[0] > 0.001f;
+    bool weights = std::abs(reference[0] - 0.2f) < 0.000001f &&
+        std::abs(reference[1] + 0.1f) < 0.000001f;
     for (std::size_t layer = 1; layer < GrateEngine::maxStreams; ++layer) {
         auto isolated = e;
         Access::isolateLayer(isolated, layer);
@@ -724,7 +865,7 @@ void testMassSwayProfilesAndLayerWeights() {
         weights = weights && std::abs(out[0] / reference[0] - std::pow(0.85, layer)) < 0.00001 &&
             std::abs(out[1] / reference[1] - std::pow(0.85, layer)) < 0.00001;
     }
-    CHECK(weights, "separately normalized MASS layers contribute85percent of the preceding layer's amplitude");
+    CHECK(weights, "additive MASS preserves the main layer's level and contributes85percent per successive layer");
 }
 
 void testWeakAuxiliarySwayRemainsContinuousInSync() {
@@ -795,7 +936,7 @@ void testMassAutomationRampsAndSafety() {
     CHECK(ramps && largestStep < 0.04, "MASS activation/deactivation ramps avoid abrupt entry clicks on nonconstant input");
     CHECK(callbackAllocations.load() == 0 && e.memoryBytes() == memory,
           "layer scheduling/activation uses fixed capture memory and never allocates on the audio thread");
-    p.dryDb = 0; p.wetDb = -60; p.duckDryPercent = 0;
+    p.dryDb = 0; p.wetDb = -60; p.duckWetPercent = 0;
     e.setParameters(p); e.reset();
     bool dryUnchanged = true;
     for (int n = 0; n < 12000; ++n) {
@@ -817,6 +958,9 @@ void testMassLongToShortGrainsKeepLayerCoverage() {
     p.attackMinMs = p.attackMaxMs = 40;
     p.envMinPercent = 0; p.envMaxPercent = 100;
     p.panMinPercent = p.panMaxPercent = 0;
+    // Match the test's output level with the user's WET control: continuity
+    // should detect missing voices, independently of the intended MASS boost.
+    p.wetDb = static_cast<float>(-20.0 * std::log10((1.0 - std::pow(0.85, 8)) / 0.15));
     e.setParameters(p); e.reset();
     bool coverage = true, valid = true, finite = true, bounded = true;
     double largestStep = 0.0;
@@ -1032,7 +1176,8 @@ void testLongUnequalGrainOverlap() {
     p.scatterMs = 6000.0;
     p.mass = 8;
     e.setParameters(p); e.reset();
-    float previous = 0.2f;
+    const double expectedLevel = 0.02 * (1.0 - std::pow(0.85, 8)) / 0.15;
+    float previous = static_cast<float>(expectedLevel);
     double minimum = 1.0, maximum = -1.0, largestStep = 0.0;
     for (int n = 0; n < static_cast<int>(lowRate * 90.0); ++n) {
         if (n > lowRate * 10.0 && n % 35231 == 0) {
@@ -1044,16 +1189,16 @@ void testLongUnequalGrainOverlap() {
             p.envMinPercent = p.envMaxPercent = change % 2 ? 0.0 : 100.0;
             e.setParameters(p);
         }
-        const auto out = e.process(0.2f, 0.2f);
-        if (n > lowRate * 0.1) {
+        const auto out = e.process(0.02f, 0.02f);
+        if (n > lowRate * 0.5) {
             minimum = std::min(minimum, static_cast<double>(out[0]));
             maximum = std::max(maximum, static_cast<double>(out[0]));
             largestStep = std::max(largestStep, std::abs(static_cast<double>(out[0] - previous)));
         }
         previous = out[0];
     }
-    CHECK(minimum > 0.198 && maximum < 0.202,
-          "90-second unequal-duration overlap preserves DC gain through extreme GRAIN/ENV changes");
+    CHECK(minimum > expectedLevel - 0.0002 && maximum < expectedLevel + 0.0002,
+          "90-second unequal-duration overlap preserves additive MASS DC gain through extreme GRAIN/ENV changes");
     CHECK(largestStep < 0.002,
           "normalizing short and long overlapping grains never adds amplitude steps");
 }
@@ -1065,7 +1210,7 @@ void testBypassPreservesInterstagePeaks() {
     p.bypass = true;
     p.dryDb = -60.0;
     p.wetDb = 6.0;
-    p.duckDryPercent = 100.0;
+    p.duckWetPercent = 100.0;
     e.setParameters(p); e.reset();
     const std::array<float, 6> peaks {{ 1.2f, -1.8f, 0.12345f, 4.0f, -0.333f, -7.0f }};
     bool exact = true;
@@ -1520,9 +1665,10 @@ int main() {
     testDeterminism();
     testMidiProbabilityAndTail();
     testFrozenCaptureAndLiveCapture();
+    testSeededPrehistoryAndPostTriggerCapture();
     testVolumeHoldAndRelease();
     testTransientSilenceAndLockout();
-    testDryDuckingAndBypass();
+    testWetDuckingAndBypass();
     testPreviousEventDucking();
     testEventEnvelopeShape();
     testAutomationContinuity();

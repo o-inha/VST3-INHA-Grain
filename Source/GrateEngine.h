@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include "WetDucker.h"
+#include "WetEqualizer.h"
 
 namespace InhaGrate
 {
@@ -27,8 +29,9 @@ struct Parameters
     float speedMinPercent = 50.0f, speedMaxPercent = 200.0f;
     float attackMinMs = 500.0f, attackMaxMs = 1000.0f;
     float releaseMinMs = 800.0f, releaseMaxMs = 6000.0f;
-    float duckDryPercent = 90.0f, duckPreviousPercent = 90.0f;
+    float duckWetPercent = 0.0f, duckPreviousPercent = 50.0f;
     float dryDb = 0.0f, wetDb = 0.0f;
+    float eqLowCutHz = 20.0f, eqHighCutHz = 20000.0f;
     std::uint32_t seed = 254743703u;
     bool bypass = false;
     int motionMode = 0; // UNDULATION, SWAY; each mode retains its own ranges.
@@ -81,6 +84,8 @@ private:
         std::uint64_t key = 0, written = 0, grainSerial = 0;
         std::uint64_t age = 0, attack = 1, release = 1, releaseAge = 0;
         std::uint64_t captureLimit = 1;
+        std::uint64_t capturePostFrames = 1;
+        std::uint64_t historyBegin = 0, historyCount = 0, historyCopied = 0, historyZeroFrames = 0;
         std::array<std::uint32_t, maxStreams> previousGrain {};
         std::array<std::int64_t, maxStreams> nextGrain {};
         std::array<std::uint64_t, maxStreams> layerSerial {}, layerActivationSerial {};
@@ -103,6 +108,8 @@ private:
     Parameters parameters_ {};
     double sampleRate_ = 48000.0;
     std::size_t capacity_ = 0;
+    std::vector<float> history_;
+    std::uint64_t historyWritten_ = 0;
     std::int64_t timeline_ = 0, triggerLockUntil_ = 0;
     std::uint32_t pendingNotes_ = 0;
     float fast_ = 0.0f, slow_ = 0.0f, volume_ = 0.0f;
@@ -111,7 +118,9 @@ private:
     float gainAttack_ = 0.0f, gainRelease_ = 0.0f, massSmoothing_ = 0.0f;
     float dryGain_ = 1.0f, wetGain_ = 1.0f;
     float dryTarget_ = 1.0f, wetTarget_ = 1.0f, threshold_ = 0.0630957f;
-    float dryDuck_ = 1.0f, activity_ = 0.0f, wetBudgetGain_ = 1.0f;
+    WetDucker wetDucker_;
+    WetEqualizer wetEq_;
+    float activity_ = 0.0f, wetBudgetGain_ = 1.0f;
     float bypassMix_ = 0.0f;
     bool transientHigh_ = false, volumeHigh_ = false;
     int currentMode_ = 0;
