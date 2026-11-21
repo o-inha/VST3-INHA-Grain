@@ -185,6 +185,7 @@ void GrateEngine::prepare (double sampleRate)
     massSmoothing_ = coefficient (10.0, sampleRate_);
     wetDucker_.prepare (sampleRate_);
     wetEq_.prepare (sampleRate_);
+    outputLimiter_.prepare (sampleRate_);
     setParameters (parameters_);
     dryTarget_ = dbGain (parameters_.dryDb);
     wetTarget_ = dbGain (parameters_.wetDb);
@@ -204,6 +205,7 @@ void GrateEngine::reset (std::int64_t timelineSample) noexcept
     wetGain_ = wetTarget_;
     wetDucker_.reset();
     wetEq_.reset();
+    outputLimiter_.reset();
     wetBudgetGain_ = 1.0f;
     bypassMix_ = parameters_.bypass ? 1.0f : 0.0f;
     currentMode_ = parameters_.mode;
@@ -666,16 +668,6 @@ std::array<float, 2> GrateEngine::renderEvent (Event& event) noexcept
     return output;
 }
 
-float GrateEngine::protect (float sample) noexcept
-{
-    const auto magnitude = std::abs (sample);
-    if (magnitude <= 0.98f)
-        return sample;
-    // Unity below -0.18 dBFS; a continuous-slope safety knee above it. This
-    // affects exceptional peaks only and guarantees finite, bounded output.
-    return std::copysign (0.98f + 0.02f * std::tanh ((magnitude - 0.98f) * 50.0f), sample);
-}
-
 std::array<float, 2> GrateEngine::process (float left, float right) noexcept
 {
     left = finiteClamp (left, -64, 64, 0);
@@ -807,13 +799,14 @@ std::array<float, 2> GrateEngine::process (float left, float right) noexcept
     activity_ += (wetActivity - activity_) * (wetActivity > activity_ ? gainAttack_ : gainRelease_);
     std::array<float, 2> result;
     const std::array<float, 2> dry {{ left, right }};
+    const auto protectedMix = outputLimiter_.process ({{
+        dry[0] * dryGain_ + wet[0] * wetGain_ * wetBudgetGain_ * wetDuckGain,
+        dry[1] * dryGain_ + wet[1] * wetGain_ * wetBudgetGain_ * wetDuckGain }});
     for (unsigned channel = 0; channel != 2; ++channel)
     {
-        const auto processed = dry[channel] * dryGain_ +
-            wet[channel] * wetGain_ * wetBudgetGain_ * wetDuckGain;
         // Peak protection belongs to the effected branch. Full bypass must
         // preserve the original input, including legitimate interstage peaks.
-        result[channel] = protect (processed) * (1.0f - bypassMix_) +
+        result[channel] = protectedMix[channel] * (1.0f - bypassMix_) +
                           dry[channel] * bypassMix_;
     }
     if (timeline_ < std::numeric_limits<std::int64_t>::max())

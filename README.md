@@ -1,7 +1,7 @@
 # INHA Grate
 
 Windows x64 VST3 insert effect for captured granular textures. Development
-version: **0.5.0**. Built on INHA Core 0.1.2 and the native INHA editor family.
+version: **0.5.1**. Built on INHA Core 0.1.2 and the native INHA editor family.
 
 ## Getting started
 
@@ -83,6 +83,10 @@ Layer gains follow **1, 0.85, 0.7225, 0.6141…**. Every layer normalizes its ow
 overlapping windows, then the layers add without overall MASS normalization.
 The primary layer keeps its level. Eight identical layers can sum to about
 **+13.7 dB** before WET adjustment and final peak protection; lower WET to taste.
+Peak protection uses one linked gain for both channels, with a short hold and
+smooth recovery. It reduces overloaded peaks without flattening individual
+waveform crests. Below the ceiling, with no preceding overload, it is exact
+unity. MASS adds no automatic layer-count normalization.
 Adding/removing layers fades smoothly. Existing layer sequences and the main
 layer's timing/source choices stay independent of the MASS setting.
 Parallel layers can still replay source transients at different times; MASS
@@ -176,6 +180,15 @@ start/history. Audio captures and detector histories are live DSP state: seeking
 into the middle of a recording cannot reconstruct audio the plug-in has never
 received. Discontinuous transport and playback restarts reset that history. Use the same preroll for
 identical renders. Refreshing SEED intentionally changes the result.
+
+## Changes in 0.5.1
+
+- Replaced the instantaneous output clipping curve with stereo-linked peak
+  gain control. Additive MASS can raise the dry-plus-wet mix above the output
+  ceiling; the previous curve generated robotic harmonic tones in that case.
+- Preserved additive MASS gains, grain/capture timing, seed choices, and exact
+  below-ceiling audio. Full bypass continues to preserve the original input.
+- Added overloaded-sine harmonic, stereo-link and recovery regressions.
 
 ## Changes in 0.5.0
 

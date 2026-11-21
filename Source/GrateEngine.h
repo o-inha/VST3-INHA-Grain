@@ -6,6 +6,7 @@
 #include <vector>
 #include "WetDucker.h"
 #include "WetEqualizer.h"
+#include "OutputLimiter.h"
 
 namespace InhaGrate
 {
@@ -120,6 +121,7 @@ private:
     float dryTarget_ = 1.0f, wetTarget_ = 1.0f, threshold_ = 0.0630957f;
     WetDucker wetDucker_;
     WetEqualizer wetEq_;
+    OutputLimiter outputLimiter_;
     float activity_ = 0.0f, wetBudgetGain_ = 1.0f;
     float bypassMix_ = 0.0f;
     bool transientHigh_ = false, volumeHigh_ = false;
@@ -142,6 +144,5 @@ private:
     std::array<float, 2> renderEvent (Event&) noexcept;
     float grainWindow (const Grain&) const noexcept;
     float readSample (const Event&, std::uint64_t frame, unsigned channel) const noexcept;
-    static float protect (float) noexcept;
 };
 }

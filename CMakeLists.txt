@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(INHAGrate VERSION 0.5.0 LANGUAGES CXX)
+project(INHAGrate VERSION 0.5.1 LANGUAGES CXX)
 
 # Ship a self-contained Windows binary without a Visual C++ redistributable.
 if(MSVC)
@@ -63,7 +63,7 @@ if(INHA_PLUGIN_BUILD_TESTS)
     target_include_directories(GrateTimingTests PRIVATE Source)
     target_compile_features(GrateTimingTests PRIVATE cxx_std_17)
     add_test(NAME GrateTimingTests COMMAND GrateTimingTests)
-    foreach(test IN ITEMS WetDucker WetEqualizer)
+    foreach(test IN ITEMS WetDucker WetEqualizer OutputLimiter)
         add_executable(Grate${test}Tests Tests/${test}Tests.cpp)
         target_include_directories(Grate${test}Tests PRIVATE Source)
         target_compile_features(Grate${test}Tests PRIVATE cxx_std_17)

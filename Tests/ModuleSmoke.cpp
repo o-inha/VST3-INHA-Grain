@@ -740,6 +740,69 @@ void wetEqAndDuckingHost(Module& module)
     std::cout<<"Neutral wet EQ, stereo cuts, in-block cutoff automation, linked wet duck/recovery and exact dry preservation passed\n";
 }
 
+void outputLimiterHarmonicsHost(Module& module)
+{
+    Instance instance(module);MemoryStream configured;
+    require(instance.component->getState(&configured)==kResultOk,"Cannot configure limiter harmonic render");
+    const auto set=[&](ParamID id,double plain){replaceStateValue(configured,id,instance.normalized(id,plain));};
+    set(0,0);set(4,200);set(5,6000);set(6,6000);set(7,50);set(8,50);
+    set(13,40);set(14,40);set(17,0);set(18,0);set(19,0);set(20,0);
+    set(24,1);set(25,0);set(26,0);set(29,0);set(30,8);set(31,0);set(32,0);
+    set(35,20);set(36,20000);configured.position=0;
+    require(instance.component->setState(&configured)==kResultOk,"Cannot load limiter harmonic settings");
+    instance.setup(2,kSample32);
+    require(instance.audio->getLatencySamples()==0,"Output peak protection introduced additional latency");
+    constexpr int rate=48000,blockFrames=256,blocks=600;
+    constexpr double frequency=437.0,pi=3.14159265358979323846;
+    std::array<std::array<float,blockFrames>,2> input{},output{};
+    float* ins[2]{input[0].data(),input[1].data()};float* outs[2]{output[0].data(),output[1].data()};
+    AudioBusBuffers in{},out{};in.numChannels=out.numChannels=2;in.channelBuffers32=ins;out.channelBuffers32=outs;
+    ProcessContext context{};context.sampleRate=rate;context.state=ProcessContext::kPlaying;
+    ProcessData data{};data.processMode=kRealtime;data.symbolicSampleSize=kSample32;data.numSamples=blockFrames;
+    data.numInputs=data.numOutputs=1;data.inputs=&in;data.outputs=&out;data.processContext=&context;
+    std::vector<float> left;left.reserve(blockFrames*blocks);
+    float peak=0,maximumStereoError=0;
+    for(int block=0;block<blocks;++block)
+    {
+        for(int i=0;i<blockFrames;++i)
+        {
+            input[0][i]=static_cast<float>(0.4*std::sin(2*pi*frequency*(block*blockFrames+i)/rate));
+            input[1][i]=-0.5f*input[0][i];
+        }
+        context.projectTimeSamples=block*blockFrames;
+        require(instance.audio->process(data)==kResultOk,"Limiter harmonic callback failed");
+        for(int i=0;i<blockFrames;++i)
+        {
+            require(std::isfinite(output[0][i])&&std::isfinite(output[1][i]),"Peak protection produced non-finite audio");
+            peak=std::max({peak,std::abs(output[0][i]),std::abs(output[1][i])});
+            maximumStereoError=std::max(maximumStereoError,std::abs(output[1][i]+0.5f*output[0][i]));
+            left.push_back(output[0][i]);
+        }
+    }
+    // With live BUFFER fully limiting every grain, the readheads coincide.
+    // Their sum remains a single sine; extra steady harmonics reveal output
+    // waveshaping rather than expected changes in granular timing or source.
+    const auto magnitude=[&](int harmonic)
+    {
+        double real=0,imaginary=0;
+        constexpr int start=rate*3/2,count=rate;
+        for(int i=0;i<count;++i)
+        {
+            const auto phase=2*pi*frequency*harmonic*i/rate;
+            real+=left[start+i]*std::cos(phase);imaginary-=left[start+i]*std::sin(phase);
+        }
+        return 2.0*std::sqrt(real*real+imaginary*imaginary)/count;
+    };
+    const auto fundamental=magnitude(1);
+    double harmonicPower=0;for(int harmonic=2;harmonic<=9;++harmonic){const auto value=magnitude(harmonic);harmonicPower+=value*value;}
+    const auto thd=std::sqrt(harmonicPower)/std::max(1e-12,fundamental);
+    require(peak<=0.98001f,"Linked output protection exceeded its peak ceiling");
+    require(fundamental>0.2,"Limiter harmonic regression rendered silence or excessive attenuation");
+    require(maximumStereoError<2e-6f,"Peak protection independently reshaped the stereo channels");
+    require(thd<0.02,"Overloaded additive MASS still generated new saw-like steady harmonics");
+    std::cout<<"Linked output limiter ceiling/stereo/latency and steady overload harmonic regression passed (THD "<<thd<<")\n";
+}
+
 void fixtureOffsets(Module& module) {
     const auto silent=renderFixture(module,-1),note=renderFixture(module,128),repeated=renderFixture(module,128);
     for(int i=0;i<128;++i)require(std::abs(note[i]-silent[i])<1e-7f,"MIDI note affected audio before its sample offset");
@@ -772,7 +835,7 @@ int wmain(int argc,wchar_t** argv) {
     try{
         require(argc==3,"Usage: GrateModuleSmoke <production-vst3-binary> <fixture-binary>");
         {Module production(argv[1]);formatSmoke<float>(production,1,kSample32);formatSmoke<float>(production,2,kSample32);formatSmoke<double>(production,1,kSample64);formatSmoke<double>(production,2,kSample64);}
-        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);transportRestartRepeatability(fixture);syncAndPanHost(fixture);tripletChoicesHost(fixture);eqFrequencyChoicesHost(fixture);wetEqAndDuckingHost(fixture);}
+        {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);transportRestartRepeatability(fixture);syncAndPanHost(fixture);tripletChoicesHost(fixture);eqFrequencyChoicesHost(fixture);wetEqAndDuckingHost(fixture);outputLimiterHarmonicsHost(fixture);}
         std::cout<<"Grate Windows module smoke passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }
