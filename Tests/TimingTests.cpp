@@ -1,4 +1,4 @@
-#include "GrainTiming.h"
+#include "GrateTiming.h"
 
 #include <array>
 #include <cmath>
@@ -20,7 +20,7 @@ void near (double value, double expected, const char* message)
 
 int main()
 {
-    using namespace InhaGrain::Timing;
+    using namespace InhaGrate::Timing;
     try
     {
         near (minimumDuration (false, 80), 40, "Free duration starts at 40 ms");

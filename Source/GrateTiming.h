@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <string>
 
-namespace InhaGrain::Timing
+namespace InhaGrate::Timing
 {
 inline constexpr double minimumMilliseconds = 40.0;
 inline constexpr double maximumMilliseconds = 6000.0;

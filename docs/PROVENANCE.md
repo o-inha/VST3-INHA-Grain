@@ -17,9 +17,9 @@ curves, theme colors, Windows resource helpers, and package script remain
 the authoritative shared implementation.
 
 The native editor adapts the shipping Tear editor's controls, typography,
-header/footer layout, settings icons and appearance preferences. Grain's logo
+header/footer layout, settings icons and appearance preferences. Grate's logo
 is the artwork supplied by the product owner. Font and wood textures are the
-existing INHA resources. The audio engine is a new implementation for Grain.
+existing INHA resources. The audio engine is a new implementation for Grate.
 
 Steinberg's SDK is fetched at build time at tag `v3.7.14_build_55`, including
 submodules, and is not committed in this repository. Its upstream license
@@ -38,5 +38,5 @@ one gradually attenuates previous material on overdub passes. Voices are
 simultaneous grains, spread their overlap/phase relationship, and LIN/JIT
 randomizes voice playback positions. The exact internal DSP is unpublished.
 
-Grain follows the requested new design, rather than reproducing STREAM's
+Grate follows the requested new design, rather than reproducing STREAM's
 controls, artwork, code, feedback path or proprietary algorithms.

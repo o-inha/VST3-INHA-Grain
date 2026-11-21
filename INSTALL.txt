@@ -1,16 +1,16 @@
-INHA Grain 0.3.2 - Windows x64 VST3
+INHA Grate 0.4.0 - Windows x64 VST3
 
 1. Close your DAW.
-2. Copy the entire "INHA Grain.vst3" folder to:
+2. Copy the entire "INHA Grate.vst3" folder to:
    C:\Program Files\Common Files\VST3\
 3. Put your manually generated inha-licence.key in:
-   INHA Grain.vst3\Contents\Resources\
-4. Rescan VST3 plug-ins in your DAW and insert INHA Grain on an audio or
+   INHA Grate.vst3\Contents\Resources\
+4. Rescan VST3 plug-ins in your DAW and insert INHA Grate on an audio or
    instrument track. For MIDI NOTES mode, route MIDI notes to this effect
    using the routing provided by your DAW.
 
 Keep the whole .vst3 folder together. Do not copy just the binary inside it.
-The ZIP contains no licence key. Product identifier: inha-grain.
+The ZIP contains no licence key. Product identifier: inha-grate.
 
 Drag controls vertically; Shift gives fine adjustment. For ranges, Ctrl moves
 both ends together and Alt changes the width. Double-click resets a control.
@@ -21,8 +21,12 @@ Saved 0.1/0.2 settings migrate duration values into the new limits.
 Each motion tab retains its own AMOUNT/SPEED settings. NONE uses SWAY.
 
 Free durations: 40 MS to 6 S. SYNC: 1/16 note to 2 bars (4/4).
-MASS selects 1x to 8x parallel streams. PAN varies each grain's stereo balance.
+MASS selects 1x to 8x wet layers with progressively lower gain.
+Added layers use their own repeatable slow SWAY at 5-25 percent. PAN varies each grain's stereo balance.
 BUFFER caps the effective GRAIN size; pink values identify requested ranges
 that currently exceed BUFFER. Raising BUFFER restores those requested sizes.
 
 In SYNC mode, T beside BUFFER and GRAIN independently adds triplet divisions.
+
+The renamed product uses a new VST3 identity and the licence product
+inha-grate. Existing instances of the previous product remain separate.

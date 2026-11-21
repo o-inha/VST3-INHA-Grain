@@ -2,7 +2,7 @@
 #include <gdiplus.h>
 #include <initializer_list>
 
-namespace inha::grainIcons
+namespace inha::grateIcons
 {
 enum class Icon { trigger, dices };
 // Geometry from the supplied 24px trigger-guard.svg and Lucide dices.svg.

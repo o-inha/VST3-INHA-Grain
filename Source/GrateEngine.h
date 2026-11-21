@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace InhaGrain
+namespace InhaGrate
 {
 struct Parameters
 {
@@ -39,12 +39,16 @@ struct Parameters
 // No SDK, locks, allocation, file access, or bulk copies on the audio path.
 // prepare() is the only allocation point; reset() invalidates capture history
 // by changing counters, without clearing the (potentially large) buffers.
-class GrainEngine
+class GrateEngine
 {
 public:
     static constexpr std::size_t maxEvents = 6;
     static constexpr std::size_t maxStreams = 8;
-    static constexpr std::size_t maxGrainsPerEvent = 64;
+    static constexpr std::size_t maxGrainsPerEvent = 192;
+    static constexpr std::size_t mainLayerGrains = 24;
+    static constexpr std::size_t extraLayerGrains = 24;
+    static_assert (mainLayerGrains + (maxStreams - 1) * extraLayerGrains == maxGrainsPerEvent,
+                   "MASS layer reservations must fit the fixed grain budget");
 
     void prepare (double sampleRate);
     void reset (std::int64_t timelineSample = 0) noexcept;
@@ -57,11 +61,13 @@ public:
     std::size_t activeEvents() const noexcept;
 
 private:
-    friend struct GrainEngineTestAccess;
+    friend struct GrateEngineTestAccess;
     struct Grain
     {
         bool active = false;
         std::uint32_t age = 0, duration = 0;
+        std::uint64_t serial = 0;
+        std::uint8_t layer = 0;
         std::uint64_t begin = 0;
         std::uint32_t position = 0;
         float leftGain = 1.0f, rightGain = 1.0f;
@@ -77,6 +83,9 @@ private:
         std::uint64_t captureLimit = 1;
         std::array<std::uint32_t, maxStreams> previousGrain {};
         std::array<std::int64_t, maxStreams> nextGrain {};
+        std::array<std::uint64_t, maxStreams> layerSerial {}, layerActivationSerial {};
+        std::array<bool, maxStreams> layerEnabled {};
+        std::array<float, maxStreams> layerQuantile {}, layerGain {};
         std::uint64_t audioStart = 0;
         bool audioStarted = false;
         float releaseStart = 1.0f, envelope = 0.0f;
@@ -99,7 +108,7 @@ private:
     float fast_ = 0.0f, slow_ = 0.0f, volume_ = 0.0f;
     float fastAttack_ = 0.0f, fastRelease_ = 0.0f, slowAttack_ = 0.0f;
     float slowRelease_ = 0.0f, volumeAttack_ = 0.0f, volumeRelease_ = 0.0f;
-    float gainAttack_ = 0.0f, gainRelease_ = 0.0f;
+    float gainAttack_ = 0.0f, gainRelease_ = 0.0f, massSmoothing_ = 0.0f;
     float dryGain_ = 1.0f, wetGain_ = 1.0f;
     float dryTarget_ = 1.0f, wetTarget_ = 1.0f, threshold_ = 0.0630957f;
     float dryDuck_ = 1.0f, activity_ = 0.0f, wetBudgetGain_ = 1.0f;
@@ -114,6 +123,9 @@ private:
     std::uint64_t samplesForMs (double ms) const noexcept;
     double swayKnotTime (std::int64_t index) const noexcept;
     float swayValue (std::int64_t absoluteSample) const noexcept;
+    std::array<double, 3> massSwayProfile (std::size_t layer) const noexcept;
+    float massSwayValue (std::size_t layer, std::int64_t absoluteSample) const noexcept;
+    static float massLayerWeight (std::size_t layer) noexcept;
     void retire (Event&, double milliseconds) noexcept;
     Event* startEvent (bool live, bool held, std::uint64_t ordinal) noexcept;
     void startRelease (Event&) noexcept;

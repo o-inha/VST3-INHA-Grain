@@ -75,7 +75,7 @@ private:
 bool preferenceEnabled (const wchar_t* name)
 {
     DWORD value = 0, size = sizeof (value);
-    return RegGetValueW (HKEY_CURRENT_USER, L"Software\\INHA\\Grain", name,
+    return RegGetValueW (HKEY_CURRENT_USER, L"Software\\INHA\\Grate", name,
                          RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS
         && value == 1;
 }
@@ -155,7 +155,7 @@ public:
         view = controller->createView (ViewType::kEditor);
         require (view != nullptr, "Could not create editor");
         require (view->setFrame (&frame) == kResultOk, "Could not set mock host frame");
-        parent = CreateWindowExW (0, L"STATIC", L"Grain editor smoke test", WS_POPUP,
+        parent = CreateWindowExW (0, L"STATIC", L"Grate editor smoke test", WS_POPUP,
                                   0, 0, 1000, 800, nullptr, nullptr, GetModuleHandleW (nullptr), nullptr);
         require (parent != nullptr, "Could not create hidden host window");
         require (view->attached (parent, kPlatformTypeHWND) == kResultOk, "Editor attach failed");
@@ -431,7 +431,7 @@ void motionControlBanks(Editor& editor,const std::filesystem::path& directory)
             &&motionValue(editor,27)==retainedSpeed[0]&&motionValue(editor,28)==retainedSpeed[1],
             "UNDULATION drags changed the independent SWAY values");
     clickMotionTab(editor,true);
-    savePreview(editor,directory,L"grain-sway-edited-100.png");
+    savePreview(editor,directory,L"grate-sway-edited-100.png");
     clickMotionTab(editor,false);
 }
 
@@ -484,12 +484,12 @@ void bufferCapAndNewControls(Editor& editor,const std::filesystem::path& directo
         return pink;
     };
     require(pinkValues(capture(editor))>5,"BUFFER-limited GRAIN values did not turn pink");
-    savePreview(editor,directory,L"grain-buffer-capped-100.png");
+    savePreview(editor,directory,L"grate-buffer-capped-100.png");
     setPlain("Capture buffer",6000);editor.settleFooter();
     require(motionValue(editor,5)==requested[0]&&motionValue(editor,6)==requested[1],
             "Raising BUFFER lost the requested GRAIN handle positions");
     auto uncapped=capture(editor);
-    uncapped.save(directory/L"grain-buffer-allowed-100.png");
+    uncapped.save(directory/L"grate-buffer-allowed-100.png");
     require(pinkValues(uncapped)==0,"GRAIN values remained pink after BUFFER allowed the requested sizes");
     const auto mass=editor.plain("Grain mass");
     editor.dragAt(61,91,50);
@@ -504,7 +504,7 @@ void bufferCapAndNewControls(Editor& editor,const std::filesystem::path& directo
             "Bottom DRY/WET sliders did not change output levels");
     editor.clickAt(458,14);editor.settleFooter();
     require(editor.plain("Tempo sync")==1,"Header SYNC button did not enable tempo synchronization");
-    savePreview(editor,directory,L"grain-sync-100.png");
+    savePreview(editor,directory,L"grate-sync-100.png");
     editor.clickAt(458,14);editor.settleFooter();
     require(editor.plain("Tempo sync")==0,"Header SYNC button did not disable tempo synchronization");
     editor.doubleClickAt(61,91);editor.doubleClickAt(439,91);
@@ -528,7 +528,7 @@ void noneModeDisablesEventControls(Editor& editor,const std::filesystem::path& d
             "NONE mode edited event UNDULATION instead of continuous SWAY");
     require(motionValue(editor,25)!=sway[0]||motionValue(editor,26)!=sway[1],
             "NONE mode did not expose working SWAY controls");
-    savePreview(editor,directory,L"grain-none-sway-100.png");
+    savePreview(editor,directory,L"grate-none-sway-100.png");
     editor.set("Trigger mode",1.0/3.0);
     clickMotionTab(editor,false);
     editor.doubleClickAt(61,253);
@@ -620,7 +620,7 @@ void headerAppearance(Editor& editor,const std::filesystem::path& directory,cons
     const auto scale=editor.size().getWidth()>=660?1.5:1.0;
     const auto physical=[&](int value){return static_cast<int>(std::lround(value*scale));};
     const auto savedMode=editor.controller->getParamNormalized(editor.parameter("Trigger mode"));
-    const std::wstring prefix=L"grain-header-"+std::wstring(appearance);
+    const std::wstring prefix=L"grate-header-"+std::wstring(appearance);
     editor.set("Tempo sync",0);editor.moveTo(200,330);editor.settleFooter();
     auto off=capture(editor);off.save(directory/(prefix+L"-sync-off.png"));
     editor.clickAt(458,14);editor.moveTo(200,330);editor.settleFooter();
@@ -699,10 +699,10 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         Editor editor (*module.factory);
         const auto initial = editor.size();
         require (initial.getWidth()==750 && initial.getHeight()==549,
-                 "New Grain editor must open at 150 percent");
+                 "New Grate editor must open at 150 percent");
         require (!preferenceEnabled (L"ThemeDark"), "Isolated preferences did not start light");
-        savePreview (editor,directory,L"grain-light-150.png");
-        swayPreview(editor,directory,L"grain-light-sway-150.png");
+        savePreview (editor,directory,L"grate-light-150.png");
+        swayPreview(editor,directory,L"grate-light-sway-150.png");
         headerAppearance(editor,directory,L"light-150",false);
 
         // Footer actions become clickable only when the settings gear is open.
@@ -711,24 +711,24 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         editor.clickAt (119,footerMiddle);
         require (editor.size().getWidth()==750, "Collapsed zoom action was clickable");
         expandSettings (editor);
-        capture(editor).save(directory/L"grain-settings-150.png");
+        capture(editor).save(directory/L"grate-settings-150.png");
 
         clickSetting(editor,87);
         require(preferenceEnabled(L"ThemeDark"),"Settings theme control did not persist dark mode");
-        savePreview(editor,directory,L"grain-dark-150.png");
-        swayPreview(editor,directory,L"grain-dark-sway-150.png");
+        savePreview(editor,directory,L"grate-dark-150.png");
+        swayPreview(editor,directory,L"grate-dark-sway-150.png");
         headerAppearance(editor,directory,L"dark-150",true);
         clickSetting(editor,119);
         require(editor.size().getWidth()==500 && editor.size().getHeight()==366,
                 "Settings zoom control did not resize to 100 percent");
         require(editor.frame.resizeCount>0,"Zoom did not notify the host frame");
-        savePreview(editor,directory,L"grain-dark-100.png");
-        swayPreview(editor,directory,L"grain-dark-sway-100.png");
+        savePreview(editor,directory,L"grate-dark-100.png");
+        swayPreview(editor,directory,L"grate-dark-sway-100.png");
         headerAppearance(editor,directory,L"dark-100",true);
         clickSetting(editor,87);
         require(!preferenceEnabled(L"ThemeDark"),"Settings theme did not return to light mode");
-        savePreview(editor,directory,L"grain-light-100.png");
-        swayPreview(editor,directory,L"grain-light-sway-100.png");
+        savePreview(editor,directory,L"grate-light-100.png");
+        swayPreview(editor,directory,L"grate-light-sway-100.png");
         headerAppearance(editor,directory,L"light-100",false);
         motionControlBanks(editor,directory);
         bufferCapAndNewControls(editor,directory);
@@ -751,7 +751,7 @@ void testEditor (Module& module, const std::filesystem::path& directory)
         const auto threshold=editor.plain("Volume threshold");
         editor.dragAt(137,91,70);
         require(editor.plain("Volume threshold")>threshold,"THLD control did not edit volume threshold");
-        savePreview(editor,directory,L"grain-volume-100.png");
+        savePreview(editor,directory,L"grate-volume-100.png");
     }
     // Recreating the view loads the same per-user zoom and theme choices.
     Editor reopened(*module.factory);
@@ -764,14 +764,14 @@ int wmain(int argc,wchar_t** argv)
 {
     try
     {
-        require(argc==3,"Usage: GrainEditorSmoke <fixture-binary> <preview-directory>");
+        require(argc==3,"Usage: GrateEditorSmoke <fixture-binary> <preview-directory>");
         const std::filesystem::path directory(argv[2]);
         std::filesystem::create_directories(directory);
         IsolatedCurrentUser isolated;
         GdiSession graphics;
         Module module(argv[1]);
         testEditor(module,directory);
-        std::cout<<"Grain native editor, settings, controls and appearance persistence passed\n";
+        std::cout<<"Grate native editor, settings, controls and appearance persistence passed\n";
         return 0;
     }
     catch(const std::exception& error)

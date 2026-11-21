@@ -15,6 +15,9 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -124,6 +127,29 @@ public:
     std::vector<Event> events;
 };
 
+constexpr TUID grateComponentCID=INLINE_UID(0x494E4841,0x47524154,0x45465831,0x7DA92E11);
+constexpr TUID grateControllerCID=INLINE_UID(0x494E4841,0x47524154,0x45435431,0x7DA92E12);
+constexpr TUID previousComponentCID=INLINE_UID(0x494E4841,0x47524149,0x4E465831,0x7DA92E01);
+constexpr TUID previousControllerCID=INLINE_UID(0x494E4841,0x47524149,0x4E435431,0x7DA92E02);
+
+void requireCurrentBranding(const std::filesystem::path& path,bool productBinary=false)
+{
+    std::ifstream stream(path,std::ios::binary);
+    require(stream.good(),"Cannot inspect product binary or resource branding");
+    const std::string bytes((std::istreambuf_iterator<char>(stream)),std::istreambuf_iterator<char>());
+    if(productBinary)
+        require(bytes.find("inha-grate")!=std::string::npos
+                &&bytes.find("INHA-Grate-device-v1:")!=std::string::npos,
+                "New Grate licence product identity was missing from the binary");
+    for(const char* previous:{"INHA Grain","inha-grain","INHA-Grain-device-v1:"})
+    {
+        require(bytes.find(previous)==std::string::npos,"Previous product branding remained in the binary or resources");
+        std::string utf16;
+        for(const char* p=previous;*p;++p){utf16.push_back(*p);utf16.push_back(0);}
+        require(bytes.find(utf16)==std::string::npos,"Previous wide-string product branding remained in the binary or resources");
+    }
+}
+
 class Module
 {
 public:
@@ -136,7 +162,30 @@ public:
         factory=factoryFn();require(factory&&factory->countClasses()==2,"Expected component and controller factory classes");
         PFactoryInfo info{};require(factory->getFactoryInfo(&info)==kResultOk,"Factory metadata failed");
         require(std::string(info.vendor)=="INHA","Wrong vendor identity");
-        for(int i=0;i<2;++i){PClassInfo c{};require(factory->getClassInfo(i,&c)==kResultOk,"Class metadata failed");require(std::string(c.name).find("INHA Grain")==0,"Wrong product identity");}
+        for(int i=0;i<2;++i)
+        {
+            PClassInfo c{};require(factory->getClassInfo(i,&c)==kResultOk,"Class metadata failed");
+            require(std::string(c.name)==(i==0?"INHA Grate":"INHA Grate Controller"),"Wrong Grate product identity");
+            require(same(c.cid,i==0?grateComponentCID:grateControllerCID),"Factory did not expose the new Grate class IDs");
+        }
+        for(int i=0;i<2;++i)
+        {
+            void* oldInstance=nullptr;
+            require(factory->createInstance(i==0?previousComponentCID:previousControllerCID,
+                    i==0?IComponent_iid:IEditController_iid,&oldInstance)!=kResultOk&&oldInstance==nullptr,
+                    "The renamed plugin still exposed a previous product class ID");
+        }
+        const std::filesystem::path binary(path);
+        requireCurrentBranding(binary,true);
+        const auto resources=binary.parent_path().parent_path()/L"Resources";
+        require(std::filesystem::is_directory(resources),"The VST3 resource directory was missing");
+        for(const auto& entry:std::filesystem::recursive_directory_iterator(resources))
+        {
+            const auto name=entry.path().filename().string();
+            require(name.find("Grain")==std::string::npos&&name.find("grain")==std::string::npos,
+                    "Previous product name remained in a resource filename");
+            if(entry.is_regular_file())requireCurrentBranding(entry.path());
+        }
     }
     ~Module(){if(factory)factory->release();if(exit)exit();if(library)FreeLibrary(library);}
     IPluginFactory* factory=nullptr;
@@ -149,6 +198,9 @@ public:
         PClassInfo info{};require(module.factory->getClassInfo(0,&info)==kResultOk,"Component class missing");
         require(module.factory->createInstance(info.cid,IComponent_iid,reinterpret_cast<void**>(&component))==kResultOk&&component,"Component creation failed");
         require(component->initialize(nullptr)==kResultOk,"Component initialize failed");
+        TUID controllerId{};
+        require(component->getControllerClassId(controllerId)==kResultOk&&same(controllerId,grateControllerCID),
+                "Component retained the previous controller identity");
         require(component->queryInterface(IAudioProcessor_iid,reinterpret_cast<void**>(&audio))==kResultOk&&audio,"Audio processor interface missing");
         require(component->queryInterface(IEditController_iid,reinterpret_cast<void**>(&controller))==kResultOk&&controller,"Controller interface missing");
         require(controller->getParameterCount()==35,"Parameter inventory changed unexpectedly");
@@ -228,7 +280,7 @@ void stateCompatibility(Module& module)
     require(std::equal(expectedSway.begin(),expectedSway.end(),motionText),"Host motion list does not label SWAY correctly");
     MemoryStream saved;
     require(instance.component->getState(&saved)==kResultOk,"Could not save initial v4 state");
-    require(saved.bytes.size()==8+35*sizeof(double)&&stateWord(saved,0)==0x47524149u&&stateWord(saved,4)==4,
+    require(saved.bytes.size()==8+35*sizeof(double)&&stateWord(saved,0)==0x47524154u&&stateWord(saved,4)==4,
             "Expected v4 state with 35 parameter values");
     const auto setPlain=[&](ParamID id,double plain){replaceStateValue(saved,id,instance.normalized(id,plain));};
     // Independent motion banks and new controls must survive a full project save.
@@ -253,7 +305,7 @@ void stateCompatibility(Module& module)
     {
         MemoryStream legacy;
         legacy.bytes=saved.bytes;legacy.bytes.resize(8+(version==1?24:29)*sizeof(double));
-        replaceStateWord(legacy,4,version);
+        replaceStateWord(legacy,4,version);replaceStateWord(legacy,0,0x47524149u);
         replaceStateValue(legacy,4,oldTime(2000,10,20000));
         replaceStateValue(legacy,5,oldTime(20,5,10000)); // New minimum clips to 40 ms.
         replaceStateValue(legacy,6,oldTime(1200,5,10000));
@@ -264,7 +316,7 @@ void stateCompatibility(Module& module)
         if(version==2){replaceStateValue(legacy,27,oldTime(250,25,20000));replaceStateValue(legacy,28,oldTime(3500,25,20000));}
         require(instance.component->setState(&legacy)==kResultOk,"Existing project version is not compatible");
         migrated.bytes.clear();migrated.position=0;
-        require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==4,
+        require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==4&&stateWord(migrated,0)==0x47524154u,
                 "Legacy project did not migrate to v4 state");
         for(const auto expected:std::array<std::pair<ParamID,double>,7>{{{4,2000},{5,40},{6,1200},{13,500},{14,1000},{15,800},{16,6000}}})
             require(std::abs(stateValue(migrated,expected.first)-instance.normalized(expected.first,expected.second))<1e-10,
@@ -292,15 +344,23 @@ void stateCompatibility(Module& module)
     }
     // v3 already uses the current time encoding and retains all 33 old lanes.
     MemoryStream v3;
-    v3.bytes=saved.bytes;v3.bytes.resize(8+33*sizeof(double));replaceStateWord(v3,4,3);
+    v3.bytes=saved.bytes;v3.bytes.resize(8+33*sizeof(double));replaceStateWord(v3,4,3);replaceStateWord(v3,0,0x47524149u);
     require(instance.component->setState(&v3)==kResultOk,"Existing v3 projects are not compatible");
     migrated.bytes.clear();migrated.position=0;
-    require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==4,
+    require(instance.component->getState(&migrated)==kResultOk&&stateWord(migrated,4)==4&&stateWord(migrated,0)==0x47524154u,
             "v3 project did not migrate to v4 state");
     for(ParamID id=0;id<33;++id)
         require(stateValue(migrated,id)==stateValue(v3,id),"v3 migration changed an existing parameter");
     require(stateValue(migrated,33)==0.0&&stateValue(migrated,34)==0.0,
             "v3 project did not default both triplet switches off");
+
+    // The new factory IDs are separate; explicitly importing an old v4 preset is supported.
+    MemoryStream previousV4;
+    previousV4.bytes=saved.bytes;replaceStateWord(previousV4,0,0x47524149u);
+    require(instance.component->setState(&previousV4)==kResultOk,"Manual import of a previous v4 preset failed");
+    migrated.bytes.clear();migrated.position=0;
+    require(instance.component->getState(&migrated)==kResultOk&&migrated.bytes==saved.bytes,
+            "Manual preset import lost parameters or did not write the new product state identity");
 
     const auto rejected=[&](MemoryStream& invalid,const char* message)
     {
@@ -543,9 +603,9 @@ void fixtureOffsets(Module& module) {
 
 int wmain(int argc,wchar_t** argv) {
     try{
-        require(argc==3,"Usage: GrainModuleSmoke <production-vst3-binary> <fixture-binary>");
+        require(argc==3,"Usage: GrateModuleSmoke <production-vst3-binary> <fixture-binary>");
         {Module production(argv[1]);formatSmoke<float>(production,1,kSample32);formatSmoke<float>(production,2,kSample32);formatSmoke<double>(production,1,kSample64);formatSmoke<double>(production,2,kSample64);}
         {Module fixture(argv[2]);stateCompatibility(fixture);fixtureOffsets(fixture);transportRestartRepeatability(fixture);syncAndPanHost(fixture);tripletChoicesHost(fixture);}
-        std::cout<<"Grain Windows module smoke passed\n";return 0;
+        std::cout<<"Grate Windows module smoke passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

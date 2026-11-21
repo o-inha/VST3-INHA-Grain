@@ -1,11 +1,11 @@
-#include "GrainEngine.h"
-#include "GrainTiming.h"
+#include "GrateEngine.h"
+#include "GrateTiming.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
-namespace InhaGrain
+namespace InhaGrate
 {
 namespace
 {
@@ -29,7 +29,7 @@ float dbGain (float db) noexcept
 }
 }
 
-std::uint64_t GrainEngine::hash (std::uint64_t value) noexcept
+std::uint64_t GrateEngine::hash (std::uint64_t value) noexcept
 {
     value += 0x9e3779b97f4a7c15ULL;
     value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -37,14 +37,14 @@ std::uint64_t GrainEngine::hash (std::uint64_t value) noexcept
     return value ^ (value >> 31);
 }
 
-float GrainEngine::random (std::uint64_t key, std::uint64_t domain) const noexcept
+float GrateEngine::random (std::uint64_t key, std::uint64_t domain) const noexcept
 {
     const auto value = hash (key ^ hash (domain) ^
                              (static_cast<std::uint64_t> (parameters_.seed) << 17));
     return static_cast<float> (value >> 40) * (1.0f / 16777216.0f);
 }
 
-float GrainEngine::pick (float minimum, float maximum, std::uint64_t key,
+float GrateEngine::pick (float minimum, float maximum, std::uint64_t key,
                         std::uint64_t domain) const noexcept
 {
     if (minimum > maximum)
@@ -52,13 +52,13 @@ float GrainEngine::pick (float minimum, float maximum, std::uint64_t key,
     return minimum + (maximum - minimum) * random (key, domain);
 }
 
-std::uint64_t GrainEngine::samplesForMs (double ms) const noexcept
+std::uint64_t GrateEngine::samplesForMs (double ms) const noexcept
 {
     return std::max<std::uint64_t> (1, static_cast<std::uint64_t> (
         std::llround (ms * sampleRate_ * 0.001)));
 }
 
-double GrainEngine::swayKnotTime (std::int64_t index) const noexcept
+double GrateEngine::swayKnotTime (std::int64_t index) const noexcept
 {
     const auto minimum = static_cast<double> (std::min (
         parameters_.swaySpeedMinMs, parameters_.swaySpeedMaxMs));
@@ -74,7 +74,7 @@ double GrainEngine::swayKnotTime (std::int64_t index) const noexcept
     return static_cast<double> (index) * period + offset * jitter;
 }
 
-float GrainEngine::swayValue (std::int64_t absoluteSample) const noexcept
+float GrateEngine::swayValue (std::int64_t absoluteSample) const noexcept
 {
     const auto minimum = static_cast<double> (std::min (
         parameters_.swaySpeedMinMs, parameters_.swaySpeedMaxMs));
@@ -116,7 +116,41 @@ float GrainEngine::swayValue (std::int64_t absoluteSample) const noexcept
     return static_cast<float> (from + (to - from) * blend);
 }
 
-void GrainEngine::prepare (double sampleRate)
+std::array<double, 3> GrateEngine::massSwayProfile (std::size_t layer) const noexcept
+{
+    const auto key = hash (0x4d4153534c415945ULL ^ layer);
+    const auto depth = 0.05 + 0.20 * random (key, 0x4445505448ULL);
+    const auto speed = random (key, 0x504552494f44ULL);
+    const auto period = parameters_.synced
+        ? (4.0 + 4.0 * speed) * 60000.0 / Timing::tempo (parameters_.tempoBpm)
+        : 3000.0 + 3000.0 * speed;
+    return { depth, period, random (key, 0x5048415345ULL) };
+}
+
+float GrateEngine::massSwayValue (std::size_t layer, std::int64_t absoluteSample) const noexcept
+{
+    const auto profile = massSwayProfile (layer);
+    const auto phase = static_cast<double> (absoluteSample) * 1000.0 /
+        (sampleRate_ * profile[1]) + profile[2];
+    const auto knot = static_cast<std::int64_t> (std::floor (phase));
+    const auto position = phase - static_cast<double> (knot);
+    const auto blend = position * position * (3.0 - 2.0 * position);
+    const auto key = hash (0x4d4153534c415945ULL ^ layer);
+    const auto from = random (key, hash (static_cast<std::uint64_t> (knot)) ^ 0x56414c5545ULL) * 2.0 - 1.0;
+    const auto to = random (key, hash (static_cast<std::uint64_t> (knot + 1)) ^ 0x56414c5545ULL) * 2.0 - 1.0;
+    return static_cast<float> (profile[0] * (from + (to - from) * blend));
+}
+
+float GrateEngine::massLayerWeight (std::size_t layer) noexcept
+{
+    static constexpr std::array<float, maxStreams> weights {{
+        1.0f, 0.85f, 0.7225f, 0.614125f, 0.52200625f,
+        0.4437053125f, 0.377149515625f, 0.32057708828125f
+    }};
+    return weights[std::min (layer, maxStreams - 1)];
+}
+
+void GrateEngine::prepare (double sampleRate)
 {
     sampleRate_ = std::clamp (std::isfinite (sampleRate) ? sampleRate : 48000.0,
                               8000.0, 384000.0);
@@ -147,6 +181,7 @@ void GrainEngine::prepare (double sampleRate)
     volumeRelease_ = coefficient (15.0, sampleRate_);
     gainAttack_ = coefficient (3.0, sampleRate_);
     gainRelease_ = coefficient (30.0, sampleRate_);
+    massSmoothing_ = coefficient (10.0, sampleRate_);
     setParameters (parameters_);
     dryTarget_ = dbGain (parameters_.dryDb);
     wetTarget_ = dbGain (parameters_.wetDb);
@@ -154,7 +189,7 @@ void GrainEngine::prepare (double sampleRate)
     reset();
 }
 
-void GrainEngine::reset (std::int64_t timelineSample) noexcept
+void GrateEngine::reset (std::int64_t timelineSample) noexcept
 {
     timeline_ = timelineSample;
     triggerLockUntil_ = timelineSample;
@@ -175,7 +210,7 @@ void GrainEngine::reset (std::int64_t timelineSample) noexcept
     }
 }
 
-void GrainEngine::setParameters (const Parameters& values) noexcept
+void GrateEngine::setParameters (const Parameters& values) noexcept
 {
     auto p = values;
     p.mode = std::clamp (p.mode, 0, 3);
@@ -223,13 +258,13 @@ void GrainEngine::setParameters (const Parameters& values) noexcept
     parameters_ = p;
 }
 
-void GrainEngine::noteOn() noexcept
+void GrateEngine::noteOn() noexcept
 {
     // A malformed or hostile MIDI stream cannot grow an unbounded queue.
     pendingNotes_ = std::min<std::uint32_t> (pendingNotes_ + 1, 64);
 }
 
-void GrainEngine::retire (Event& event, double milliseconds) noexcept
+void GrateEngine::retire (Event& event, double milliseconds) noexcept
 {
     const auto duration = static_cast<std::uint32_t> (samplesForMs (milliseconds));
     if (!event.retiring || duration < event.pressureRemaining)
@@ -241,7 +276,7 @@ void GrainEngine::retire (Event& event, double milliseconds) noexcept
     }
 }
 
-GrainEngine::Event* GrainEngine::startEvent (bool live, bool held,
+GrateEngine::Event* GrateEngine::startEvent (bool live, bool held,
                                            std::uint64_t ordinal) noexcept
 {
     Event* freeSlot = nullptr;
@@ -303,9 +338,15 @@ GrainEngine::Event* GrainEngine::startEvent (bool live, bool held,
         parameters_.scatterMs));
     event.previousGrain.fill (0);
     const auto first = std::min (samplesForMs (parameters_.durationMinimumMs), event.captureLimit);
-    const auto stagger = std::max<std::uint64_t> (1, first / (2 * parameters_.mass));
+    const auto stagger = std::max<std::uint64_t> (1, first / (2 * maxStreams));
     for (std::size_t stream = 0; stream < maxStreams; ++stream)
         event.nextGrain[stream] = static_cast<std::int64_t> (first + stream * stagger);
+    event.layerSerial.fill (0);
+    event.layerActivationSerial.fill (0);
+    event.layerEnabled.fill (false);
+    event.layerEnabled[0] = true;
+    event.layerGain.fill (0.0f);
+    event.layerGain[0] = 1.0f;
     event.audioStart = 0;
     event.audioStarted = false;
     event.releaseStart = 1.0f;
@@ -318,6 +359,9 @@ GrainEngine::Event* GrainEngine::startEvent (bool live, bool held,
     // endpoint still automates running events, without rerolling grain size
     // and fighting the direction of the event's undulation.
     event.grainQuantile = random (key, 5);
+    event.layerQuantile[0] = event.grainQuantile;
+    for (std::size_t layer = 1; layer < maxStreams; ++layer)
+        event.layerQuantile[layer] = random (hash (key ^ hash (0x4d415353ULL + layer)), 5);
     event.pressureGain = 1.0f;
     event.pressureRemaining = 0;
     for (auto& grain : event.grains)
@@ -327,7 +371,7 @@ GrainEngine::Event* GrainEngine::startEvent (bool live, bool held,
     return &event;
 }
 
-void GrainEngine::startRelease (Event& event) noexcept
+void GrateEngine::startRelease (Event& event) noexcept
 {
     if (!event.releasing)
     {
@@ -337,11 +381,19 @@ void GrainEngine::startRelease (Event& event) noexcept
     }
 }
 
-void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
+void GrateEngine::launchGrain (Event& event, std::size_t stream) noexcept
 {
+    const auto audible = stream < static_cast<std::size_t> (parameters_.mass) || event.layerGain[stream] > 0.0f;
     Grain* freeGrain = nullptr;
-    for (auto& grain : event.grains)
-        if (!grain.active) { freeGrain = &grain; break; }
+    // A fixed reservation keeps auxiliary layers from changing the main
+    // layer's capacity, random choices, or launch rhythm at any MASS setting.
+    if (audible)
+    {
+        const auto first = stream == 0 ? 0 : mainLayerGrains + (stream - 1) * extraLayerGrains;
+        const auto count = stream == 0 ? mainLayerGrains : extraLayerGrains;
+        for (std::size_t index = first; index < first + count; ++index)
+            if (!event.grains[index].active) { freeGrain = &event.grains[index]; break; }
+    }
     const auto available = std::min ({ event.written, static_cast<std::uint64_t> (capacity_),
                                       samplesForMs (parameters_.scatterMs) });
     // A grain is one contiguous, already-captured slice. Never replay a tiny
@@ -350,18 +402,28 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
         ? samplesForMs (Timing::minimumDuration (true, parameters_.tempoBpm))
         : std::min (samplesForMs (parameters_.durationMinimumMs),
             event.live ? samplesForMs (parameters_.scatterMs) : event.captureLimit);
-    if (freeGrain == nullptr || available < minimumCapture)
+    if (available < minimumCapture)
     {
         event.nextGrain[stream] = static_cast<std::int64_t> (event.age + samplesForMs (1));
         return;
     }
-    const auto serial = event.grainSerial++;
-    const auto key = hash (event.key ^ hash (serial + 0x10000));
+    const auto serial = event.layerSerial[stream]++;
+    const auto key = stream == 0
+        ? hash (event.key ^ hash (serial + 0x10000))
+        : hash (event.key ^ hash (serial + 0x10000) ^ hash (0x4d415353ULL + stream));
     const auto minimum = std::min (parameters_.grainMinMs, parameters_.grainMaxMs);
     const auto maximum = std::max (parameters_.grainMinMs, parameters_.grainMaxMs);
-    double size = minimum + (maximum - minimum) * event.grainQuantile;
-    const auto undulating = parameters_.mode != 0 && parameters_.motionMode == 0;
-    if (!undulating)
+    double size = minimum + (maximum - minimum) * event.layerQuantile[stream];
+    const auto undulating = stream == 0 && parameters_.mode != 0 && parameters_.motionMode == 0;
+    if (stream != 0)
+    {
+        // SYNC chooses an auxiliary layer's base note, while its deliberately
+        // weak slow SWAY remains continuous instead of vanishing in grid snaps.
+        if (parameters_.synced)
+            size = Timing::quantizeMilliseconds (size, parameters_.tempoBpm, parameters_.grainTriplets);
+        size *= 1.0 + massSwayValue (stream, timeline_);
+    }
+    else if (!undulating)
         size *= 1.0 + swayValue (timeline_);
     else
     {
@@ -373,7 +435,7 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
     }
     size = std::clamp (size, static_cast<double> (parameters_.durationMinimumMs),
                             static_cast<double> (parameters_.durationMaximumMs));
-    if (parameters_.synced)
+    if (parameters_.synced && stream == 0)
         size = Timing::quantizeMilliseconds (size, parameters_.tempoBpm, parameters_.grainTriplets);
     auto duration = static_cast<std::uint32_t> (std::min (samplesForMs (size), available));
     auto& previous = event.previousGrain[stream];
@@ -390,7 +452,7 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
         const auto floor = std::min (available, samplesForMs (floorMs));
         duration = std::max (duration, static_cast<std::uint32_t> (floor));
     }
-    if (parameters_.synced)
+    if (parameters_.synced && stream == 0)
     {
         // Compare integer frames, so rounding a beat to the sample grid cannot
         // accidentally floor an exact note duration to the preceding note.
@@ -406,9 +468,17 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
         duration = snapped;
     }
     previous = duration;
-
+    event.nextGrain[stream] = static_cast<std::int64_t> (event.age +
+        std::max<std::uint32_t> (1, duration / 2));
+    // Inaudible layers retain their deterministic clocks and counters, but do
+    // not allocate voices or read audio. Their future path is MASS independent.
+    if (freeGrain == nullptr)
+        return;
+    ++event.grainSerial;
     auto& grain = *freeGrain;
     grain.active = true;
+    grain.layer = static_cast<std::uint8_t> (stream);
+    grain.serial = serial;
     grain.age = grain.position = 0;
     grain.duration = duration;
     const auto shape = pick (parameters_.envMinPercent, parameters_.envMaxPercent,
@@ -431,11 +501,9 @@ void GrainEngine::launchGrain (Event& event, std::size_t stream) noexcept
         event.audioStarted = true;
         event.audioStart = event.age;
     }
-    event.nextGrain[stream] = static_cast<std::int64_t> (event.age +
-        std::max<std::uint32_t> (1, duration / 2));
 }
 
-float GrainEngine::grainWindow (const Grain& grain) const noexcept
+float GrateEngine::grainWindow (const Grain& grain) const noexcept
 {
     const auto distance = std::min (grain.age, grain.duration - grain.age);
     const auto x = std::clamp (2.0f * static_cast<float> (distance) /
@@ -453,13 +521,13 @@ float GrainEngine::grainWindow (const Grain& grain) const noexcept
     return std::min (envelope, smoothstep (static_cast<float> (distance) / edge));
 }
 
-float GrainEngine::readSample (const Event& event, std::uint64_t frame,
+float GrateEngine::readSample (const Event& event, std::uint64_t frame,
                               unsigned channel) const noexcept
 {
     return event.samples[static_cast<std::size_t> (frame % capacity_) * 2 + channel];
 }
 
-std::array<float, 2> GrainEngine::renderEvent (Event& event) noexcept
+std::array<float, 2> GrateEngine::renderEvent (Event& event) noexcept
 {
     if (event.age < event.attack)
         event.envelope = static_cast<float> (event.age) / static_cast<float> (event.attack);
@@ -494,43 +562,84 @@ std::array<float, 2> GrainEngine::renderEvent (Event& event) noexcept
         const auto remaining = event.pressureRemaining--;
         event.pressureGain *= static_cast<float> (remaining - 1) / remaining;
     }
-    for (std::size_t stream = 0; stream < static_cast<std::size_t> (parameters_.mass); ++stream)
+    for (std::size_t layer = 1; layer < maxStreams; ++layer)
+    {
+        const auto enabled = layer < static_cast<std::size_t> (parameters_.mass);
+        if (enabled && !event.layerEnabled[layer] && event.layerGain[layer] == 0.0f)
+            event.layerActivationSerial[layer] = event.layerSerial[layer];
+        event.layerEnabled[layer] = enabled;
+    }
+    for (std::size_t stream = 0; stream < maxStreams; ++stream)
         if (static_cast<std::int64_t> (event.age) >= event.nextGrain[stream])
             launchGrain (event, stream);
 
-    std::array<float, 2> output {};
-    float weight = 0.0f;
+    std::array<std::array<float, 2>, maxStreams> layerOutput {};
+    std::array<float, maxStreams> layerWindowSum {};
+    std::array<bool, maxStreams> layerRampReady {};
     for (auto& grain : event.grains)
     {
         if (!grain.active)
             continue;
         const auto window = grainWindow (grain);
-        weight += window;
-        output[0] += readSample (event, grain.begin + grain.position, 0) *
-                     window * grain.leftGain;
-        output[1] += readSample (event, grain.begin + grain.position, 1) *
-                     window * grain.rightGain;
+        layerWindowSum[grain.layer] += window;
+        if (window > 0.0f && grain.serial >= event.layerActivationSerial[grain.layer])
+            layerRampReady[grain.layer] = true;
+        layerOutput[grain.layer][0] += readSample (event, grain.begin + grain.position, 0) *
+                                      window * grain.leftGain;
+        layerOutput[grain.layer][1] += readSample (event, grain.begin + grain.position, 1) *
+                                      window * grain.rightGain;
         ++grain.position;
         if (++grain.age >= grain.duration)
             grain.active = false;
     }
-    // Normalize the actual window sum, even when unequal grain lengths make
-    // it smaller than one. A separate startup ramp preserves a smooth onset;
-    // relying on the first grain's window would cancel that fade during
-    // normalization. Event release/retirement supplies the smooth ending.
+    // Normalize overlaps within each layer before applying its .85^index
+    // contribution. A new layer's ramp starts only once audible samples exist;
+    // otherwise normalization would cancel its first grain's envelope fade.
+    std::array<float, 2> output {};
+    float totalLayerWeight = 1.0f;
+    bool hasExtraLayer = false;
+    for (std::size_t layer = 1; layer < maxStreams; ++layer)
+    {
+        const auto target = event.layerEnabled[layer] && layerRampReady[layer] ? 1.0f : 0.0f;
+        auto& gain = event.layerGain[layer];
+        gain += (target - gain) * massSmoothing_;
+        if (gain < 1.0e-6f) gain = 0.0f;
+        else if (1.0f - gain < 1.0e-6f) gain = 1.0f;
+        if (gain == 0.0f || layerWindowSum[layer] == 0.0f)
+            continue;
+        hasExtraLayer = true;
+        const auto contribution = gain * massLayerWeight (layer);
+        totalLayerWeight += contribution;
+        const auto scale = contribution / std::max (1.0e-12f, layerWindowSum[layer]);
+        output[0] += layerOutput[layer][0] * scale;
+        output[1] += layerOutput[layer][1] * scale;
+    }
     const auto startup = samplesForMs (5);
     const auto elapsed = event.audioStarted ? event.age - event.audioStart : 0;
     const auto startupGain = smoothstep (static_cast<float> (elapsed) /
                                          static_cast<float> (startup));
-    const auto gain = event.envelope * event.pressureGain * startupGain /
-                      std::max (1.0e-12f, weight);
-    output[0] *= gain;
-    output[1] *= gain;
+    const auto commonGain = event.envelope * event.pressureGain * startupGain;
+    if (!hasExtraLayer)
+    {
+        // Preserve the existing MASS1 arithmetic and resulting sample values.
+        const auto gain = commonGain / std::max (1.0e-12f, layerWindowSum[0]);
+        output[0] = layerOutput[0][0] * gain;
+        output[1] = layerOutput[0][1] * gain;
+    }
+    else
+    {
+        const auto scale = 1.0f / std::max (1.0e-12f, layerWindowSum[0]);
+        output[0] += layerOutput[0][0] * scale;
+        output[1] += layerOutput[0][1] * scale;
+        const auto gain = commonGain / totalLayerWeight;
+        output[0] *= gain;
+        output[1] *= gain;
+    }
     ++event.age;
     return output;
 }
 
-float GrainEngine::protect (float sample) noexcept
+float GrateEngine::protect (float sample) noexcept
 {
     const auto magnitude = std::abs (sample);
     if (magnitude <= 0.98f)
@@ -540,7 +649,7 @@ float GrainEngine::protect (float sample) noexcept
     return std::copysign (0.98f + 0.02f * std::tanh ((magnitude - 0.98f) * 50.0f), sample);
 }
 
-std::array<float, 2> GrainEngine::process (float left, float right) noexcept
+std::array<float, 2> GrateEngine::process (float left, float right) noexcept
 {
     left = finiteClamp (left, -64, 64, 0);
     right = finiteClamp (right, -64, 64, 0);
@@ -669,7 +778,7 @@ std::array<float, 2> GrainEngine::process (float left, float right) noexcept
     return result;
 }
 
-std::size_t GrainEngine::memoryBytes() const noexcept
+std::size_t GrateEngine::memoryBytes() const noexcept
 {
     std::size_t bytes = sizeof (*this);
     for (const auto& event : events_)
@@ -677,7 +786,7 @@ std::size_t GrainEngine::memoryBytes() const noexcept
     return bytes;
 }
 
-std::size_t GrainEngine::activeEvents() const noexcept
+std::size_t GrateEngine::activeEvents() const noexcept
 {
     std::size_t count = 0;
     for (const auto& event : events_)

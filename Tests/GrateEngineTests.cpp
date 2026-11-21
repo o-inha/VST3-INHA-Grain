@@ -1,5 +1,5 @@
-#include "GrainEngine.h"
-#include "GrainTiming.h"
+#include "GrateEngine.h"
+#include "GrateTiming.h"
 
 #include <algorithm>
 #include <array>
@@ -29,18 +29,18 @@ void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
-namespace InhaGrain {
+namespace InhaGrate {
 // Read-only inspection of scheduling values avoids guessing grain sizes from
 // the spectrum of a random audio texture. The engine grants this test fixture
 // friendship without adding a product API or work to the audio callback.
-struct GrainEngineTestAccess {
+struct GrateEngineTestAccess {
     struct EventState {
         bool active = false;
         std::uint64_t age = 0, attack = 0, release = 0, grainSerial = 0, written = 0;
         std::uint32_t previousGrain = 0;
         float grainQuantile = 0.0f, undulation = 0.0f, speed = 0.0f;
     };
-    static EventState firstEvent(const GrainEngine& engine) {
+    static EventState firstEvent(const GrateEngine& engine) {
         for (const auto& event : engine.events_) {
             if (!event.active) continue;
             return { true, event.age, event.attack, event.release, event.grainSerial,
@@ -48,7 +48,7 @@ struct GrainEngineTestAccess {
         }
         return {};
     }
-    static bool validSlices(const GrainEngine& engine) {
+    static bool validSlices(const GrateEngine& engine) {
         for (const auto& event : engine.events_) {
             if (!event.active) continue;
             for (const auto& grain : event.grains) {
@@ -62,29 +62,86 @@ struct GrainEngineTestAccess {
         }
         return true;
     }
-    static std::size_t activeGrains(const GrainEngine& engine) {
+    static std::size_t activeGrains(const GrateEngine& engine) {
         std::size_t count = 0;
         for (const auto& event : engine.events_)
             if (event.active)
                 for (const auto& grain : event.grains) count += grain.active ? 1 : 0;
         return count;
     }
-    static Parameters parameters(const GrainEngine& engine) { return engine.parameters_; }
-    static float swayAt(const GrainEngine& engine, std::int64_t sample) {
+    struct LayerState {
+        bool active = false, hasGrain = false;
+        std::uint64_t serial = 0, next = 0, grainSerial = 0, begin = 0;
+        std::uint32_t duration = 0;
+        std::uint16_t curve = 0;
+        float quantile = 0.0f, gain = 0.0f, curveMix = 0.0f, leftGain = 0.0f, rightGain = 0.0f;
+    };
+    static LayerState layerState(const GrateEngine& engine, std::size_t layer) {
+        for (const auto& event : engine.events_) {
+            if (!event.active) continue;
+            LayerState result;
+            result.active = true;
+            result.serial = event.layerSerial[layer];
+            result.next = static_cast<std::uint64_t>(event.nextGrain[layer]);
+            result.duration = event.previousGrain[layer];
+            result.quantile = event.layerQuantile[layer];
+            result.gain = event.layerGain[layer];
+            for (const auto& grain : event.grains) {
+                if (!grain.active || grain.layer != layer ||
+                    (result.hasGrain && grain.serial < result.grainSerial)) continue;
+                result.hasGrain = true;
+                result.grainSerial = grain.serial;
+                result.begin = grain.begin;
+                result.curve = grain.curve;
+                result.curveMix = grain.curveMix;
+                result.leftGain = grain.leftGain; result.rightGain = grain.rightGain;
+            }
+            return result;
+        }
+        return {};
+    }
+    static std::array<double, 3> massProfile(const GrateEngine& engine, std::size_t layer) {
+        return engine.massSwayProfile(layer);
+    }
+    static float massSwayAt(const GrateEngine& engine, std::size_t layer, std::int64_t sample) {
+        return engine.massSwayValue(layer, sample);
+    }
+    static void isolateLayer(GrateEngine& engine, std::size_t layer) {
+        for (auto& event : engine.events_) {
+            if (!event.active) continue;
+            for (auto& next : event.nextGrain) next = static_cast<std::int64_t>(event.age + 1000000);
+            for (auto& grain : event.grains)
+                if (grain.layer != layer) grain.leftGain = grain.rightGain = 0.0f;
+        }
+    }
+    static bool audibleLayersHaveCoverage(const GrateEngine& engine) {
+        for (const auto& event : engine.events_) {
+            if (!event.active) continue;
+            std::array<float, GrateEngine::maxStreams> windows {};
+            for (const auto& grain : event.grains)
+                if (grain.active) windows[grain.layer] += engine.grainWindow(grain);
+            for (std::size_t layer = 1; layer < GrateEngine::maxStreams; ++layer)
+                if (event.layerGain[layer] > 0.2f && windows[layer] == 0.0f)
+                    return false;
+        }
+        return true;
+    }
+    static Parameters parameters(const GrateEngine& engine) { return engine.parameters_; }
+    static float swayAt(const GrateEngine& engine, std::int64_t sample) {
         return engine.swayValue(sample);
     }
-    static double swayKnotAt(const GrainEngine& engine, std::int64_t index) {
+    static double swayKnotAt(const GrateEngine& engine, std::int64_t index) {
         return engine.swayKnotTime(index);
     }
-    static float currentSway(const GrainEngine& engine) {
+    static float currentSway(const GrateEngine& engine) {
         return engine.swayValue(engine.timeline_);
     }
 };
 }
 
 namespace {
-using InhaGrain::GrainEngine;
-using InhaGrain::Parameters;
+using InhaGrate::GrateEngine;
+using InhaGrate::Parameters;
 constexpr double rate = 24000.0;
 constexpr double pi = 3.14159265358979323846;
 int failures = 0;
@@ -131,7 +188,7 @@ struct Stereo {
     float right = 0.0f;
 };
 
-std::vector<Stereo> deterministicRender(GrainEngine& engine, Parameters p,
+std::vector<Stereo> deterministicRender(GrateEngine& engine, Parameters p,
                                       int blockSize, std::int64_t timeline = 0) {
     engine.setParameters(p);
     engine.reset(timeline);
@@ -164,7 +221,7 @@ double meanSquare(const std::vector<Stereo>& audio, int first, int last) {
 }
 
 void testDeterminism() {
-    GrainEngine a, b;
+    GrateEngine a, b;
     a.prepare(rate); b.prepare(rate);
     auto p = base();
     p.undulationMinPercent = -50.0;
@@ -188,7 +245,7 @@ void testDeterminism() {
 }
 
 void testMidiProbabilityAndTail() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.amount = 0.0;
@@ -216,7 +273,7 @@ void testMidiProbabilityAndTail() {
 }
 
 void testFrozenCaptureAndLiveCapture() {
-    GrainEngine frozen, live;
+    GrateEngine frozen, live;
     frozen.prepare(rate); live.prepare(rate);
     auto p = base();
     p.scatterMs = 50.0;
@@ -248,7 +305,7 @@ void testFrozenCaptureAndLiveCapture() {
 }
 
 void testVolumeHoldAndRelease() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.mode = 3;
@@ -274,7 +331,7 @@ void testVolumeHoldAndRelease() {
 }
 
 void testTransientSilenceAndLockout() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.mode = 1;
@@ -295,7 +352,7 @@ void testTransientSilenceAndLockout() {
 }
 
 void testDryDuckingAndBypass() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.dryDb = 0.0;
@@ -322,7 +379,7 @@ void testDryDuckingAndBypass() {
 }
 
 void testPreviousEventDucking() {
-    GrainEngine keep, duck;
+    GrateEngine keep, duck;
     keep.prepare(rate); duck.prepare(rate);
     auto p = base();
     p.scatterMs = 60.0;
@@ -350,7 +407,7 @@ void testPreviousEventDucking() {
 }
 
 void testEventEnvelopeShape() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.scatterMs = 50.0;
@@ -377,7 +434,7 @@ void testEventEnvelopeShape() {
 }
 
 void testAutomationContinuity() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.mode = 0;
@@ -411,7 +468,7 @@ void testAutomationContinuity() {
 }
 
 void testShortCaptureLoopSeams() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.scatterMs = 17.0;
@@ -443,8 +500,8 @@ double lagCorrelation(const std::vector<float>& audio, int begin, int end, int l
 }
 
 void testTriggerDoesNotManufactureTinyLoopTones() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    GrainEngine e;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.scatterMs = 2000.0f;
@@ -491,8 +548,8 @@ void testTriggerDoesNotManufactureTinyLoopTones() {
 }
 
 void testMassPanAndCaptureBoundaries() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    GrainEngine single, dense, left, right;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine single, dense, left, right;
     single.prepare(8000.0); dense.prepare(8000.0); left.prepare(8000.0); right.prepare(8000.0);
     auto p = base();
     p.mode = 0; p.scatterMs = 250.0f;
@@ -517,7 +574,7 @@ void testMassPanAndCaptureBoundaries() {
         const auto r = right.process(0.2f, -0.1f);
         const auto active = Access::activeGrains(dense);
         peakGrains = std::max(peakGrains, active);
-        bounded = bounded && active <= GrainEngine::maxGrainsPerEvent;
+        bounded = bounded && active <= GrateEngine::maxGrainsPerEvent;
         slices = slices && Access::validSlices(dense);
         if (n > 800) {
             levelDifference = std::max(levelDifference, static_cast<double>(std::abs(a[0] - b[0])));
@@ -550,9 +607,250 @@ void testMassPanAndCaptureBoundaries() {
           "sync-resolved durations retain their expanded millisecond domain");
 }
 
+bool sameLayerPath(const InhaGrate::GrateEngineTestAccess::LayerState& a,
+                   const InhaGrate::GrateEngineTestAccess::LayerState& b) {
+    return a.active == b.active && a.hasGrain == b.hasGrain && a.serial == b.serial &&
+        a.next == b.next && a.duration == b.duration && a.quantile == b.quantile &&
+        (!a.hasGrain || (a.grainSerial == b.grainSerial && a.begin == b.begin &&
+            a.curve == b.curve && a.curveMix == b.curveMix &&
+            a.leftGain == b.leftGain && a.rightGain == b.rightGain));
+}
+
+void testMassLayersKeepIndependentPatterns() {
+    using Access = InhaGrate::GrateEngineTestAccess;
+    constexpr double lowRate = 8000.0;
+    GrateEngine single, two, dense;
+    single.prepare(lowRate); two.prepare(lowRate); dense.prepare(lowRate);
+    auto p = base(); p.mode = 0; p.scatterMs = 1800.0f;
+    p.grainMinMs = 100.0f; p.grainMaxMs = 600.0f;
+    p.envMinPercent = 0; p.envMaxPercent = 100;
+    p.panMinPercent = -100; p.panMaxPercent = 100;
+    p.swayAmountMinPercent = 10; p.swayAmountMaxPercent = 60;
+    p.mass = 1; single.setParameters(p); single.reset(7777);
+    p.mass = 2; two.setParameters(p); two.reset(7777);
+    p.mass = 8; dense.setParameters(p); dense.reset(7777);
+    bool mainStable = true, retainedStable = true, ghostStable = true;
+    for (int n = 0; n < 64000; ++n) {
+        if (n % 5579 == 0) {
+            p.grainMinMs = (n / 5579) % 2 ? 40.0f : 700.0f;
+            p.grainMaxMs = (n / 5579) % 3 ? 1000.0f : 100.0f;
+            p.mass = 1; single.setParameters(p);
+            p.mass = 2; two.setParameters(p);
+            p.mass = (n / 5579) % 2 ? 3 : 8; dense.setParameters(p);
+        }
+        const auto input = static_cast<float>(0.13 * std::sin(n * 0.031) + 0.06 * std::sin(n * 0.073));
+        single.process(input, -input * 0.7f);
+        two.process(input, -input * 0.7f);
+        dense.process(input, -input * 0.7f);
+        mainStable = mainStable && sameLayerPath(Access::layerState(single, 0), Access::layerState(dense, 0));
+        retainedStable = retainedStable && sameLayerPath(Access::layerState(two, 1), Access::layerState(dense, 1));
+        const auto ghost = Access::layerState(single, 6), audible = Access::layerState(dense, 6);
+        ghostStable = ghostStable && ghost.serial == audible.serial && ghost.next == audible.next &&
+            ghost.duration == audible.duration && ghost.quantile == audible.quantile;
+    }
+    CHECK(mainStable, "MASS changes preserve every main-layer duration/source/ENV/PAN choice and launch time");
+    CHECK(retainedStable, "existing auxiliary layer patterns remain unchanged when higher MASS layers change");
+    CHECK(ghostStable, "inaudible MASS layers retain the same deterministic scheduling path without rendering voices");
+
+    p = base(); p.mode = 3; p.mass = 8; p.scatterMs = 1800;
+    p.grainMinMs = 150; p.grainMaxMs = 600;
+    p.motionMode = 0; p.undulationMinPercent = p.undulationMaxPercent = -100;
+    two.setParameters(p); two.reset(8811);
+    p.motionMode = 1; p.swayAmountMinPercent = p.swayAmountMaxPercent = 100;
+    p.swaySpeedMinMs = 40; p.swaySpeedMaxMs = 80;
+    dense.setParameters(p); dense.reset(8811);
+    bool extrasIgnoreMain = true, primaryDiffers = false;
+    for (int n = 0; n < 40000; ++n) {
+        two.process(0.2f, 0.2f); dense.process(0.2f, 0.2f);
+        primaryDiffers = primaryDiffers || !sameLayerPath(Access::layerState(two, 0), Access::layerState(dense, 0));
+        for (std::size_t layer = 1; layer < GrateEngine::maxStreams; ++layer)
+            extrasIgnoreMain = extrasIgnoreMain && sameLayerPath(Access::layerState(two, layer), Access::layerState(dense, layer));
+    }
+    CHECK(primaryDiffers && extrasIgnoreMain,
+          "auxiliary layers use their own slow SWAY and ignore the main layer's UNDULATION and SWAY controls");
+}
+
+void testMassSwayProfilesAndLayerWeights() {
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine e;
+    e.prepare(8000.0);
+    auto p = base(); p.mode = 0; p.mass = 8; p.scatterMs = 1200;
+    p.grainMinMs = p.grainMaxMs = 200;
+    p.swayAmountMinPercent = p.swayAmountMaxPercent = 0;
+    p.attackMinMs = p.attackMaxMs = 40;
+    p.panMinPercent = p.panMaxPercent = 0;
+    e.setParameters(p); e.reset(337799);
+    bool freeRanges = true, bounded = true, independent = false, continuous = true, resetStable = true;
+    for (std::size_t layer = 1; layer < GrateEngine::maxStreams; ++layer) {
+        const auto profile = Access::massProfile(e, layer);
+        freeRanges = freeRanges && profile[0] >= 0.05 && profile[0] <= 0.25 &&
+            profile[1] >= 3000 && profile[1] <= 6000 && profile[2] >= 0 && profile[2] < 1;
+        for (int n = -150; n < 400; ++n) {
+            const auto sample = static_cast<std::int64_t>(n) * 997;
+            const auto x = Access::massSwayAt(e, layer, sample);
+            bounded = bounded && std::abs(x) <= profile[0] + 1.0e-6;
+            continuous = continuous && std::abs(x - Access::massSwayAt(e, layer, sample + 1)) < 0.0001f;
+            independent = independent || x != Access::massSwayAt(e, layer == 1 ? 2 : 1, sample);
+            e.reset(sample);
+            resetStable = resetStable && x == Access::massSwayAt(e, layer, sample);
+        }
+    }
+    CHECK(freeRanges && bounded && continuous, "each added layer has smooth independent SWAY depth5..25percent and free period3..6seconds");
+    CHECK(independent && resetStable, "auxiliary SWAY phases are independently seeded and repeat across positive/negative timeline resets");
+    const auto prior = Access::massProfile(e, 1);
+    ++p.seed; e.setParameters(p);
+    CHECK(prior != Access::massProfile(e, 1), "refreshing the main seed also changes auxiliary layer SWAY profiles");
+    --p.seed;
+    for (const float bpm : { 20.0f, 120.0f, 999.0f }) {
+        p.synced = true; p.tempoBpm = bpm; e.setParameters(p);
+        bool barRanges = true;
+        for (std::size_t layer = 1; layer < GrateEngine::maxStreams; ++layer) {
+            const auto profile = Access::massProfile(e, layer);
+            const auto beats = profile[1] * bpm / 60000.0;
+            barRanges = barRanges && beats >= 4.0 && beats <= 8.0;
+        }
+        CHECK(barRanges, "SYNC auxiliary SWAY transition periods remain within one to two4/4bars");
+    }
+    p.synced = false; e.setParameters(p); e.reset();
+    for (int n = 0; n < 8000; ++n) e.process(0.2f, -0.1f);
+    auto mainOnly = e;
+    Access::isolateLayer(mainOnly, 0);
+    const auto reference = mainOnly.process(0.2f, -0.1f);
+    bool weights = reference[0] > 0.001f;
+    for (std::size_t layer = 1; layer < GrateEngine::maxStreams; ++layer) {
+        auto isolated = e;
+        Access::isolateLayer(isolated, layer);
+        const auto out = isolated.process(0.2f, -0.1f);
+        weights = weights && std::abs(out[0] / reference[0] - std::pow(0.85, layer)) < 0.00001 &&
+            std::abs(out[1] / reference[1] - std::pow(0.85, layer)) < 0.00001;
+    }
+    CHECK(weights, "separately normalized MASS layers contribute85percent of the preceding layer's amplitude");
+}
+
+void testWeakAuxiliarySwayRemainsContinuousInSync() {
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine e;
+    constexpr double lowRate = 8000.0;
+    e.prepare(lowRate);
+    auto p = base(); p.mode = 0; p.mass = 8; p.synced = true; p.tempoBpm = 120;
+    p.durationMinimumMs = 125; p.durationMaximumMs = 4000;
+    p.scatterMs = 2000; p.grainMinMs = p.grainMaxMs = 500;
+    p.swayAmountMinPercent = p.swayAmountMaxPercent = 0;
+    bool foundWeakDepth = false;
+    for (std::uint32_t seed = 1; seed < 1024; ++seed) {
+        p.seed = seed; e.setParameters(p);
+        if (Access::massProfile(e, 1)[0] < 0.055) { foundWeakDepth = true; break; }
+    }
+    e.reset(777111);
+    std::uint32_t minimum = std::numeric_limits<std::uint32_t>::max(), maximum = 0;
+    bool mainOnGrid = true, offGridAux = false;
+    for (int n = 0; n < 96000; ++n) {
+        e.process(0.2f, 0.2f);
+        if (n < lowRate) continue;
+        const auto main = Access::layerState(e, 0), auxiliary = Access::layerState(e, 1);
+        mainOnGrid = mainOnGrid && main.duration == 4000;
+        minimum = std::min(minimum, auxiliary.duration);
+        maximum = std::max(maximum, auxiliary.duration);
+        offGridAux = offGridAux || auxiliary.duration != 4000;
+    }
+    CHECK(foundWeakDepth && mainOnGrid && offGridAux && maximum - minimum > 5,
+          "weak5percent auxiliary SYNC SWAY moves continuously around its selected base note while layer0 stays on grid");
+}
+
+void testMassAutomationRampsAndSafety() {
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine e;
+    e.prepare(rate);
+    auto p = base(); p.mode = 0; p.mass = 1; p.scatterMs = 800;
+    p.grainMinMs = p.grainMaxMs = 160;
+    p.swayAmountMinPercent = p.swayAmountMaxPercent = 0;
+    p.attackMinMs = p.attackMaxMs = 40;
+    e.setParameters(p); e.reset();
+    bool finite = true, valid = true, ramps = true, bounded = true;
+    double largestStep = 0.0;
+    float previous = 0.0f;
+    const auto memory = e.memoryBytes();
+    callbackAllocations = 0;
+    trackAllocation = true;
+    for (int n = 0; n < 120000; ++n) {
+        if (n > 6000 && n % 5777 == 0) {
+            p.mass = (n / 5777) % 3 == 0 ? 1 : ((n / 5777) % 3 == 1 ? 8 : 3);
+            e.setParameters(p);
+        }
+        const auto out = e.process(static_cast<float>(0.18 * std::sin(n * 0.0231)),
+                                   static_cast<float>(0.12 * std::sin(n * 0.0187)));
+        finite = finite && std::isfinite(out[0]) && std::isfinite(out[1]);
+        bounded = bounded && std::abs(out[0]) <= 1.0f && std::abs(out[1]) <= 1.0f;
+        valid = valid && Access::validSlices(e) && e.activeEvents() <= GrateEngine::maxEvents;
+        if (n > 6000) largestStep = std::max(largestStep, std::abs(static_cast<double>(out[0] - previous)));
+        previous = out[0];
+        for (std::size_t layer = 1; layer < GrateEngine::maxStreams; ++layer) {
+            const auto state = Access::layerState(e, layer);
+            ramps = ramps && state.gain >= 0 && state.gain <= 1;
+        }
+    }
+    trackAllocation = false;
+    CHECK(finite && bounded && valid, "automated MASS layers retain finite bounded audio and safe captured source reads");
+    std::printf("MASS automation largest step %.8f\n", largestStep);
+    CHECK(ramps && largestStep < 0.04, "MASS activation/deactivation ramps avoid abrupt entry clicks on nonconstant input");
+    CHECK(callbackAllocations.load() == 0 && e.memoryBytes() == memory,
+          "layer scheduling/activation uses fixed capture memory and never allocates on the audio thread");
+    p.dryDb = 0; p.wetDb = -60; p.duckDryPercent = 0;
+    e.setParameters(p); e.reset();
+    bool dryUnchanged = true;
+    for (int n = 0; n < 12000; ++n) {
+        p.mass = n % 8 + 1; e.setParameters(p);
+        const auto out = e.process(0.2f, -0.1f);
+        dryUnchanged = dryUnchanged && out[0] == 0.2f && out[1] == -0.1f;
+    }
+    CHECK(dryUnchanged, "MASS normalization never applies an additional gain multiplier to the dry signal");
+}
+
+void testMassLongToShortGrainsKeepLayerCoverage() {
+    using Access = InhaGrate::GrateEngineTestAccess;
+    constexpr int lowRate = 8000;
+    GrateEngine e;
+    e.prepare(lowRate);
+    auto p = base(); p.mode = 0; p.mass = 8; p.scatterMs = 6000;
+    p.grainMinMs = p.grainMaxMs = 6000;
+    p.swayAmountMinPercent = p.swayAmountMaxPercent = 0;
+    p.attackMinMs = p.attackMaxMs = 40;
+    p.envMinPercent = 0; p.envMaxPercent = 100;
+    p.panMinPercent = p.panMaxPercent = 0;
+    e.setParameters(p); e.reset();
+    bool coverage = true, valid = true, finite = true, bounded = true;
+    double largestStep = 0.0;
+    float previous = 0.0f;
+    const auto memory = e.memoryBytes();
+    callbackAllocations = 0;
+    trackAllocation = true;
+    for (int n = 0; n < lowRate * 40; ++n) {
+        if (n == lowRate * 20) {
+            p.grainMinMs = p.grainMaxMs = 40;
+            e.setParameters(p);
+        }
+        const auto out = e.process(0.6f * std::sin(n * 0.0231f), 0.4f * std::sin(n * 0.0187f));
+        finite = finite && std::isfinite(out[0]) && std::isfinite(out[1]);
+        bounded = bounded && std::abs(out[0]) <= 1 && std::abs(out[1]) <= 1;
+        valid = valid && Access::validSlices(e) && Access::activeGrains(e) <= GrateEngine::maxGrainsPerEvent;
+        if (n > lowRate * 20) {
+            coverage = coverage && Access::audibleLayersHaveCoverage(e);
+            largestStep = std::max(largestStep, std::abs(static_cast<double>(out[0] - previous)));
+        }
+        previous = out[0];
+    }
+    trackAllocation = false;
+    CHECK(coverage, "MASS8 retains actual auxiliary voice coverage during extreme6second-to40ms grain reduction");
+    CHECK(finite && bounded && valid && largestStep < 0.06,
+          "high-amplitude long-to-short MASS automation stays finite without voice-exhaustion discontinuities");
+    CHECK(callbackAllocations.load() == 0 && e.memoryBytes() == memory,
+          "expanded fixed voice reservations require no runtime allocation or additional capture memory");
+    std::printf("MASS long-to-short largest step %.8f\n", largestStep);
+}
+
 void testFrozenBufferAutomationAndDirtyResets() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    GrainEngine e;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base(); p.mode = 3;
     p.scatterMs = 500.0f; p.grainMinMs = p.grainMaxMs = 300.0f;
@@ -597,9 +895,9 @@ void testFrozenBufferAutomationAndDirtyResets() {
 }
 
 void testSyncPicksStayOnMusicalGrid() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    namespace Timing = InhaGrain::Timing;
-    GrainEngine e;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    namespace Timing = InhaGrate::Timing;
+    GrateEngine e;
     constexpr double lowRate = 8000.0;
     e.prepare(lowRate);
     bool eventGrid = true, grainGrid = true, slices = true;
@@ -640,10 +938,10 @@ void testSyncPicksStayOnMusicalGrid() {
 }
 
 void testTripletGrainPoolsAndIndependentBufferCap() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    namespace Timing = InhaGrain::Timing;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    namespace Timing = InhaGrate::Timing;
     constexpr double lowRate = 8000.0;
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(lowRate);
     auto p = base();
     p.mode = 3; p.synced = true; p.tempoBpm = 120.0f;
@@ -721,7 +1019,7 @@ void testTripletGrainPoolsAndIndependentBufferCap() {
 }
 
 void testLongUnequalGrainOverlap() {
-    GrainEngine e;
+    GrateEngine e;
     constexpr double lowRate = 8000.0;
     e.prepare(lowRate);
     auto p = base();
@@ -761,7 +1059,7 @@ void testLongUnequalGrainOverlap() {
 }
 
 void testBypassPreservesInterstagePeaks() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(rate);
     auto p = base();
     p.bypass = true;
@@ -788,9 +1086,9 @@ void testBypassPreservesInterstagePeaks() {
 }
 
 void testEventGrainQuantileAndUndulation() {
-    using Access = InhaGrain::GrainEngineTestAccess;
+    using Access = InhaGrate::GrateEngineTestAccess;
     constexpr double lowRate = 8000.0;
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(lowRate);
     auto p = base();
     p.mode = 3; // Held triggered event permits UNDULATION.
@@ -885,10 +1183,10 @@ void testEventGrainQuantileAndUndulation() {
 }
 
 void testUndulationUsesSelectedGrainMinimum() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    namespace Timing = InhaGrain::Timing;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    namespace Timing = InhaGrate::Timing;
     constexpr double lowRate = 8000.0;
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(lowRate);
     struct Result { std::uint32_t endpoint = 0; float quantile = 0.0f; };
     const auto render = [&](float lower, float upper, float amount, float buffer,
@@ -960,8 +1258,8 @@ void testUndulationUsesSelectedGrainMinimum() {
 }
 
 void testSwayTimelineAndRange() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    GrainEngine a, b;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine a, b;
     constexpr double lowRate = 8000.0;
     a.prepare(lowRate); b.prepare(lowRate);
     auto p = base();
@@ -1025,7 +1323,7 @@ void testSwayTimelineAndRange() {
 }
 
 void testSwayAudioDeterminism() {
-    GrainEngine a, b;
+    GrateEngine a, b;
     a.prepare(rate); b.prepare(rate);
     auto p = base();
     p.motionMode = 1;
@@ -1051,8 +1349,8 @@ void testSwayAudioDeterminism() {
 }
 
 void testSwaySpeedAndSmoothness() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    GrainEngine e;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine e;
     constexpr double lowRate = 8000.0;
     e.prepare(lowRate);
     auto p = base();
@@ -1085,8 +1383,8 @@ void testSwaySpeedAndSmoothness() {
 }
 
 void testSwayZeroDepthAndBaseAutomation() {
-    using Access = InhaGrain::GrainEngineTestAccess;
-    GrainEngine under, sway;
+    using Access = InhaGrate::GrateEngineTestAccess;
+    GrateEngine under, sway;
     under.prepare(rate); sway.prepare(rate);
     auto p = base();
     p.undulationMinPercent = p.undulationMaxPercent = 0.0f;
@@ -1134,7 +1432,7 @@ void testSwayZeroDepthAndBaseAutomation() {
 }
 
 void testSwayAutomationSafety() {
-    GrainEngine e;
+    GrateEngine e;
     constexpr double lowRate = 8000.0;
     e.prepare(lowRate);
     auto p = base();
@@ -1178,7 +1476,7 @@ void testSwayAutomationSafety() {
 }
 
 void testFloodFiniteAndNoAllocations() {
-    GrainEngine e;
+    GrateEngine e;
     e.prepare(48000.0);
     auto p = base();
     p.scatterMs = 20000.0;
@@ -1207,7 +1505,7 @@ void testFloodFiniteAndNoAllocations() {
         const auto out = e.process(in, -in);
         finite = finite && std::isfinite(out[0]) && std::isfinite(out[1]);
         bounded = bounded && std::abs(out[0]) <= 1.00001f && std::abs(out[1]) <= 1.00001f;
-        budget = budget && e.activeEvents() <= GrainEngine::maxEvents;
+        budget = budget && e.activeEvents() <= GrateEngine::maxEvents;
     }
     trackAllocation = false;
     CHECK(finite, "flooded triggers, hostile input, and automation always produce finite output");
@@ -1231,6 +1529,11 @@ int main() {
     testShortCaptureLoopSeams();
     testTriggerDoesNotManufactureTinyLoopTones();
     testMassPanAndCaptureBoundaries();
+    testMassLayersKeepIndependentPatterns();
+    testMassSwayProfilesAndLayerWeights();
+    testWeakAuxiliarySwayRemainsContinuousInSync();
+    testMassAutomationRampsAndSafety();
+    testMassLongToShortGrainsKeepLayerCoverage();
     testFrozenBufferAutomationAndDirtyResets();
     testSyncPicksStayOnMusicalGrid();
     testTripletGrainPoolsAndIndependentBufferCap();
@@ -1248,6 +1551,6 @@ int main() {
         std::fprintf(stderr, "%d Grain engine check(s) failed.\n", failures);
         return 1;
     }
-    std::puts("All Grain engine checks passed.");
+    std::puts("All Grate engine checks passed.");
     return 0;
 }

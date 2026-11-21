@@ -1,16 +1,16 @@
-# INHA Grain
+# INHA Grate
 
 Windows x64 VST3 insert effect for captured granular textures. Development
-version: **0.3.2**. Built on INHA Core 0.1.2 and the native INHA editor family.
+version: **0.4.0**. Built on INHA Core 0.1.2 and the native INHA editor family.
 
 ## Getting started
 
-Install the complete `INHA Grain.vst3` folder as explained in INSTALL.txt.
-Generate a normal INHA key for product **`inha-grain`** and place
+Install the complete `INHA Grate.vst3` folder as explained in INSTALL.txt.
+Generate a normal INHA key for product **`inha-grate`** and place
 `inha-licence.key` in its `Contents/Resources` directory. No key is supplied or
 committed. The production module uses the shared INHA licensing implementation.
 
-Insert Grain after your instrument. Start with TRANSIENTS, adjust PICKUP., and
+Insert Grate after your instrument. Start with TRANSIENTS, adjust PICKUP., and
 balance DRY/WET. In MIDI NOTES mode route notes to the effect using your DAW's
 MIDI routing; AMOUNT sets the probability of accepting each note. Notes trigger
 events without transposing their audio.
@@ -23,7 +23,7 @@ Two values under a control are the lower/upper bounds of a seeded random range.
 |---|---|
 | TRIGGER | NONE, TRANSIENTS, MIDI NOTES, VOLUME |
 | AMOUNT / PICKUP / THLD | MIDI acceptance probability, transient sensitivity, or volume threshold; inactive in NONE |
-| MASS | 1×–8× parallel grain streams per event; higher values thicken the cloud without multiplying output gain |
+| MASS | 1×–8× wet layers. The main layer follows the visible motion controls; added layers use independent seeded slow SWAY and progressively lower levels |
 | BUFFER | Duration of the source audio available for random grain starts |
 | GRAIN | Requested grain-duration range; effective durations cannot exceed BUFFER or the source audio already captured |
 | PAN | Seeded per-grain stereo balance range, −100 (left) to +100 (right); 0 preserves the original stereo balance |
@@ -60,6 +60,30 @@ UNDULATION SPEED remains a percentage of A + R.
 GRAIN handles retain the requested values above BUFFER. The white range arc
 and numeric values show the effective capped range; affected values turn pink.
 Raising BUFFER restores the previously requested range automatically.
+
+## MASS layers
+
+MASS 1× plays the main wet layer. Each higher setting adds another parallel wet
+layer sharing the event trigger and captured audio. The direct DRY signal is
+mixed once.
+
+The main layer follows the selected UNDULATION/SWAY controls. Added layers
+ignore UNDULATION and the visible SWAY settings. Each gets a separate,
+repeatable random identity derived from the main SEED and its layer index,
+including its own source positions, grain-size choices, PAN and grain window.
+Its built-in slow SWAY selects a depth in **5–25%**, with movement over
+**3–6 seconds** in free time or **1–2 bars (4/4)** with SYNC enabled. In SYNC, an added layer starts from a
+valid GRAIN division and then drifts smoothly around it; its hidden SWAY is
+continuous so weak movement is not flattened by note-length snapping. The main
+layer continues to follow the selected SYNC divisions.
+
+Layer gains follow **1, 0.85, 0.7225, 0.6141…** before normalization. Every
+layer normalizes its own overlapping windows, and the combined wet signal
+uses the weighted active-layer gain sum to prevent large volume increases.
+Adding/removing layers fades smoothly. Existing layer sequences and the main
+layer's timing/source choices stay independent of the MASS setting.
+Parallel layers can still replay source transients at different times; MASS
+adds an evolving cloud rather than guaranteeing unchanged transient rhythm.
 
 ## Grain-size motion
 
@@ -108,8 +132,8 @@ safe segments until enough source has been captured. A short capture is never
 looped inside a longer grain; this prevents the former pitched startup tones.
 Each event owns its capture; later notes do not replace an older event's source audio.
 
-Grains choose seeded random positions. Each stream uses 50% overlap and window
-normalization; MASS streams choose independent seeded positions and PAN values.
+Grains choose seeded random positions. Each layer uses 50% overlap and independent window
+normalization; MASS layers choose independent seeded positions and PAN values.
 Active grains keep their duration and envelope: automation and
 grain-size motion change subsequent grains with smooth transitions. Even square-like
 windows retain short edge ramps. Every source read is inside captured audio.
@@ -127,6 +151,15 @@ start/history. Audio captures and detector histories are live DSP state: seeking
 into the middle of a recording cannot reconstruct audio the plug-in has never
 received. Discontinuous transport and playback restarts reset that history. Use the same preroll for
 identical renders. Refreshing SEED intentionally changes the result.
+
+## Changes in 0.4.0
+
+- Renamed the product, bundle, VST3 identities, licensing ID, preferences and
+  resources to INHA Grate / inha-grate, with the new supplied logo.
+- MASS now adds quieter independent layers with forced slow 5–25% SWAY.
+- Main and existing layer random sequences stay stable when MASS changes.
+- Older saved parameter payloads can be imported manually; the DAW sees the
+  renamed product as a separate VST3 identity.
 
 ## Changes in 0.3.2
 

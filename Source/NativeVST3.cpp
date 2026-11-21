@@ -12,12 +12,12 @@
 #include "AutomationTimeline.h"
 #include "ProcessorParameterState.h"
 #include "ParameterDisplay.h"
-#include "GrainEngine.h"
-#include "GrainTiming.h"
+#include "GrateEngine.h"
+#include "GrateTiming.h"
 #include "Version.h"
 #include "FooterIcons.h"
-#include "GrainIcons.h"
-#include "GrainPreferences.h"
+#include "GrateIcons.h"
+#include "GratePreferences.h"
 
 #include <inha/license/LicenseManager.h>
 #include <inha/parameter/Curve.h>
@@ -86,8 +86,8 @@ std::wstring licenseMessageWithHelp (const std::wstring& message)
 }
 
 
-constexpr TUID componentCID = INLINE_UID (0x494E4841, 0x47524149, 0x4E465831, 0x7DA92E01);
-constexpr TUID controllerCID = INLINE_UID (0x494E4841, 0x47524149, 0x4E435431, 0x7DA92E02);
+constexpr TUID componentCID = INLINE_UID (0x494E4841, 0x47524154, 0x45465831, 0x7DA92E11);
+constexpr TUID controllerCID = INLINE_UID (0x494E4841, 0x47524154, 0x45435431, 0x7DA92E12);
 enum Parameter : ParamID {
  triggerMode, amount, sensitivity, threshold, scatter, grainMinimum, grainMaximum,
  envMinimum, envMaximum, undulationMinimum, undulationMaximum, speedMinimum, speedMaximum,
@@ -218,7 +218,7 @@ std::wstring displayValue(ParamID id,double value) {
  else std::swprintf(text,64,L"%.0f%%",value);
  return text;
 }
-struct SavedStateHeader { std::uint32_t magic=0x47524149u,version=4; };
+struct SavedStateHeader { std::uint32_t magic=0x47524154u,version=4; };
 constexpr std::size_t stateV1ParameterCount = 24, stateV2ParameterCount = 29, stateV3ParameterCount = 33;
 static_assert (bypass == 23 && motionMode == stateV1ParameterCount && tempoSync == stateV2ParameterCount && bufferTriplets == stateV3ParameterCount && parameterCount == 35);
 constexpr std::size_t maximumAutomationPoints=2048;
@@ -464,7 +464,7 @@ public:
   if(data.symbolicSampleSize==kSample64&&(!input.channelBuffers64||!output.channelBuffers64))return kInvalidArgument;
   for(int c=0;c<channels;++c)if(data.symbolicSampleSize==kSample32?(!input.channelBuffers32[c]||!output.channelBuffers32[c]):(!input.channelBuffers64[c]||!output.channelBuffers64[c]))return kInvalidArgument;
   if(data.processContext&&(data.processContext->state&ProcessContext::kTempoValid)&&std::isfinite(data.processContext->tempo)&&data.processContext->tempo>0)
-   hostTempo.store(InhaGrain::Timing::tempo(data.processContext->tempo),std::memory_order_relaxed);
+   hostTempo.store(InhaGrate::Timing::tempo(data.processContext->tempo),std::memory_order_relaxed);
   const bool playing=data.processContext&&(data.processContext->state&ProcessContext::kPlaying);
   const auto timeline=data.processContext&&playing?data.processContext->projectTimeSamples:freeRunningSample;
   const bool discontinuity=playing&&(!hostWasPlaying||!haveExpectedSample||std::llabs(timeline-expectedSample)>1);
@@ -511,7 +511,7 @@ public:
   }
   finishAutomationBlock(data.numSamples);grainActive.store(!denied&&engine.isActive());output.silenceFlags=silentChannels;return kResultOk;
  }
- uint32 PLUGIN_API getTailSamples() override{return static_cast<uint32>(std::min(sampleRate*(InhaGrain::Timing::maximumCaptureMilliseconds*0.002+0.1),4294967294.0));}
+ uint32 PLUGIN_API getTailSamples() override{return static_cast<uint32>(std::min(sampleRate*(InhaGrate::Timing::maximumCaptureMilliseconds*0.002+0.1),4294967294.0));}
  tresult PLUGIN_API setComponentState(IBStream* state) override{return readState(state);}
  int32 PLUGIN_API getParameterCount() override{return parameterCount;}
  tresult PLUGIN_API getParameterInfo(int32 index,ParameterInfo& info) override{
@@ -525,7 +525,7 @@ public:
   if(id>=parameterCount)return kInvalidArgument;const double p=toPlain(id,normalized);
   if(const char* name=choiceName(id,p)){copyUtf16(text,name);return kResultOk;}
   const auto value=id==seedHigh||id==seedLow?std::to_wstring(static_cast<unsigned>(std::lround(p))):
-   specs[id].time&&plain(tempoSync)>=0.5?std::wstring(InhaGrain::Timing::syncLabel(normalized,tripletsFor(id))):displayValue(id,p);
+   specs[id].time&&plain(tempoSync)>=0.5?std::wstring(InhaGrate::Timing::syncLabel(normalized,tripletsFor(id))):displayValue(id,p);
   for(std::size_t i=0;i<128;++i)text[i]=i<value.size()?static_cast<char16>(value[i]):0;
   return kResultOk;
  }
@@ -537,7 +537,7 @@ public:
   if((id==dryLevel||id==wetLevel)&&_strnicmp(b,"-INF",4)==0){normalized=0;return kResultOk;}
   if(specs[id].time&&plain(tempoSync)>=0.5){
    std::wstring label;for(int i=0;text[i]&&i<127;++i)label.push_back(static_cast<wchar_t>(std::towupper(text[i])));
-   const auto note=InhaGrain::Timing::syncNormalizedFromLabel(label,tripletsFor(id));
+   const auto note=InhaGrate::Timing::syncNormalizedFromLabel(label,tripletsFor(id));
    if(note>=0){normalized=note;return kResultOk;}
    if(label.find(L'/')!=std::wstring::npos)return kResultFalse;
   }
@@ -548,16 +548,16 @@ public:
  }
  ParamValue PLUGIN_API normalizedParamToPlain(ParamID id,ParamValue value) override{
   return id<parameterCount&&specs[id].time&&plain(tempoSync)>=0.5
-   ?InhaGrain::Timing::syncMilliseconds(value,tempoForView(),tripletsFor(id)):toPlain(id,value);
+   ?InhaGrate::Timing::syncMilliseconds(value,tempoForView(),tripletsFor(id)):toPlain(id,value);
  }
  ParamValue PLUGIN_API plainParamToNormalized(ParamID id,ParamValue value) override{
   if(id<parameterCount&&specs[id].time&&plain(tempoSync)>=0.5){
    std::size_t nearest=0;double distance=std::numeric_limits<double>::max();
-   for(std::size_t i=0;i<InhaGrain::Timing::choiceCount(tripletsFor(id));++i){
-    const auto d=std::abs(InhaGrain::Timing::syncMilliseconds(InhaGrain::Timing::syncNormalized(i,tripletsFor(id)),tempoForView(),tripletsFor(id))-value);
+   for(std::size_t i=0;i<InhaGrate::Timing::choiceCount(tripletsFor(id));++i){
+    const auto d=std::abs(InhaGrate::Timing::syncMilliseconds(InhaGrate::Timing::syncNormalized(i,tripletsFor(id)),tempoForView(),tripletsFor(id))-value);
     if(d<distance){nearest=i;distance=d;}
    }
-   return InhaGrain::Timing::syncNormalized(nearest,tripletsFor(id));
+   return InhaGrate::Timing::syncNormalized(nearest,tripletsFor(id));
   }
   return toNormal(id,value);
  }
@@ -601,7 +601,7 @@ public:
             return;
         normalized = quantizeNormal (id, normalized);
         if (specs[id].time && plain(tempoSync)>=0.5)
-            normalized=InhaGrain::Timing::syncNormalized(InhaGrain::Timing::syncIndex(normalized,tripletsFor(id)),tripletsFor(id));
+            normalized=InhaGrate::Timing::syncNormalized(InhaGrate::Timing::syncIndex(normalized,tripletsFor(id)),tripletsFor(id));
         values[id].store (normalized, std::memory_order_relaxed);
         localEditValues[id].store (normalized, std::memory_order_relaxed);
         localEditing[id].store (gesture <= 0, std::memory_order_release);
@@ -744,7 +744,7 @@ public:
 private:
  tresult readState(IBStream* stream){
   if(!stream)return kInvalidArgument;SavedStateHeader h{};int32 bytes=0;
-  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||h.magic!=0x47524149u||(h.version!=1&&h.version!=2&&h.version!=3&&h.version!=4))return kResultFalse;
+  if(stream->read(&h,sizeof(h),&bytes)!=kResultOk||bytes!=sizeof(h)||(h.magic!=0x47524154u&&h.magic!=0x47524149u)||(h.version!=1&&h.version!=2&&h.version!=3&&h.version!=4))return kResultFalse;
   std::array<double,parameterCount> p{};
   for(ParamID id=0;id<parameterCount;++id)p[id]=defaultStateNormalized(id);
   const auto count=h.version==1?stateV1ParameterCount:h.version==2?stateV2ParameterCount:h.version==3?stateV3ParameterCount:static_cast<std::size_t>(parameterCount);
@@ -843,16 +843,16 @@ private:
     }
 
 
- InhaGrain::Parameters makeSettings(const std::array<double,parameterCount>& p) const noexcept {
+ InhaGrate::Parameters makeSettings(const std::array<double,parameterCount>& p) const noexcept {
   const bool synced=toPlain(tempoSync,p[tempoSync])>=0.5;
   const auto bpm=hostTempo.load(std::memory_order_relaxed);
   const auto allowTriplets=[&](ParamID id){return id==scatter?toPlain(bufferTriplets,p[bufferTriplets])>=0.5:
       (id==grainMinimum||id==grainMaximum)&&toPlain(grainTriplets,p[grainTriplets])>=0.5;};
-  const auto v=[&](ParamID id){return synced&&specs[id].time?InhaGrain::Timing::syncMilliseconds(p[id],bpm,allowTriplets(id)):toPlain(id,p[id]);};InhaGrain::Parameters result;
+  const auto v=[&](ParamID id){return synced&&specs[id].time?InhaGrate::Timing::syncMilliseconds(p[id],bpm,allowTriplets(id)):toPlain(id,p[id]);};InhaGrate::Parameters result;
   result.bufferTriplets=synced&&allowTriplets(scatter);result.grainTriplets=synced&&allowTriplets(grainMinimum);
   result.synced=synced;result.tempoBpm=static_cast<float>(bpm);
-  result.durationMinimumMs=InhaGrain::Timing::minimumDuration(synced,bpm);
-  result.durationMaximumMs=InhaGrain::Timing::maximumDuration(synced,bpm);
+  result.durationMinimumMs=InhaGrate::Timing::minimumDuration(synced,bpm);
+  result.durationMaximumMs=InhaGrate::Timing::maximumDuration(synced,bpm);
   result.mode=static_cast<int>(std::lround(v(triggerMode)));
   result.motionMode=result.mode==0?1:static_cast<int>(std::lround(v(motionMode)));
   result.swayAmountMinPercent=v(swayAmountMinimum);result.swayAmountMaxPercent=v(swayAmountMaximum);
@@ -880,11 +880,11 @@ private:
  ParameterTimeline automationTimeline;
  std::atomic<double> rememberedDryLevel{toNormal(dryLevel,0)},rememberedWetLevel{toNormal(wetLevel,0)};
  IComponentHandler* componentHandler=nullptr;IComponentHandler2* componentHandler2=nullptr;NativeView* view=nullptr;
- InhaGrain::GrainEngine engine;SpeakerArrangement arrangement=SpeakerArr::kStereo;double sampleRate=44100;
+ InhaGrate::GrateEngine engine;SpeakerArrangement arrangement=SpeakerArr::kStereo;double sampleRate=44100;
  bool prepared=false,hostWasPlaying=false,haveExpectedSample=false;TSamples expectedSample=0,freeRunningSample=0;
  std::atomic<double> hostTempo{120.0};
  std::atomic<bool> needsReset{false},grainActive{false};
- InhaLicense::Manager license{{"inha-grain",L"INHA Grain",InhaGrainVersion::ascii,"INHA-Grain-device-v1:"}};
+ InhaLicense::Manager license{{"inha-grate",L"INHA Grate",InhaGrateVersion::ascii,"INHA-Grate-device-v1:"}};
 };
 void PluginInstance::invalidateView()
 {
@@ -895,7 +895,7 @@ void PluginInstance::invalidateView()
 NativeView::NativeView (PluginInstance& instance) : owner (instance)
 {
     owner.addRef();
-    const auto preferences = GrainPreferences::read();
+    const auto preferences = GratePreferences::read();
     darkTheme = preferences.darkTheme;
     zoomed = observedGlobalZoom = preferences.zoomed;
     viewSize = { 0, 0, zoomed ? zoomedEditorWidth : baseEditorWidth,
@@ -916,7 +916,7 @@ NativeView::NativeView (PluginInstance& instance) : owner (instance)
         }
         return image;
     };
-    headerLogo = loadImage (bundleResourcePath (L"INHA-Grain-Logo.png"));
+    headerLogo = loadImage (bundleResourcePath (L"INHA-Grate-Logo.png"));
     woodLeft = loadImage (bundleResourcePath (L"wood-left-20px.jpg"));
     woodRight = loadImage (bundleResourcePath (L"wood-right-20px.jpg"));
 }
@@ -974,10 +974,10 @@ tresult PLUGIN_API NativeView::attached (void* parent, FIDString type)
     windowClass.lpfnWndProc = windowProcedure;
     windowClass.hInstance = moduleInstance;
     windowClass.hCursor = LoadCursorW (nullptr, MAKEINTRESOURCEW (32512));
-    windowClass.lpszClassName = L"InhaGrainView_v103";
+    windowClass.lpszClassName = L"InhaGrateView_v103";
     RegisterClassExW (&windowClass);
 
-    window = CreateWindowExW (0, windowClass.lpszClassName, L"INHA Grain",
+    window = CreateWindowExW (0, windowClass.lpszClassName, L"INHA Grate",
                               WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
                               0, 0, viewSize.getWidth(), viewSize.getHeight(),
                               static_cast<HWND> (parent), nullptr, moduleInstance, this);
@@ -1284,7 +1284,7 @@ void NativeView::toggleZoom()
 {
     if (! setZoom (! zoomed)) return;
     std::wstring error;
-    if (! GrainPreferences::setZoomed (zoomed, error))
+    if (! GratePreferences::setZoomed (zoomed, error))
         showPreferenceError (error);
     else
         observedGlobalZoom = zoomed;
@@ -1293,7 +1293,7 @@ void NativeView::toggleZoom()
 void NativeView::toggleTheme()
 {
     std::wstring error;
-    if (! GrainPreferences::setDarkTheme (! darkTheme, error))
+    if (! GratePreferences::setDarkTheme (! darkTheme, error))
         showPreferenceError (error);
     else
         darkTheme = ! darkTheme;
@@ -1307,7 +1307,7 @@ void NativeView::pollPreferences()
     // Do not resize a control underneath an ongoing edit or native dialog.
     if (GetCapture() == window || seedEditing || nativeDialogOpen) return;
     lastPreferencesPoll = now;
-    const auto preferences = GrainPreferences::read();
+    const auto preferences = GratePreferences::read();
     const auto themeChanged = darkTheme != preferences.darkTheme;
     darkTheme = preferences.darkTheme;
     if (preferences.zoomed != observedGlobalZoom)
@@ -1498,7 +1498,7 @@ void NativeView::updateTriggerMenuHover (int x, int y)
 void NativeView::showPreferenceError (const std::wstring& error)
 {
     nativeDialogOpen = true;
-    MessageBoxW (window, error.c_str(), L"INHA Grain — could not save preferences",
+    MessageBoxW (window, error.c_str(), L"INHA Grate — could not save preferences",
                  MB_OK | MB_ICONERROR);
     nativeDialogOpen = false;
 }
@@ -2011,18 +2011,18 @@ void NativeView::paint (HDC windowDC)
     const auto frameTempo=owner.tempoForView();
     const auto allowTriplets=[&](ParamID id){return id==scatter?toPlain(bufferTriplets,displayed[bufferTriplets])>=0.5:
         (id==grainMinimum||id==grainMaximum)&&toPlain(grainTriplets,displayed[grainTriplets])>=0.5;};
-    const auto normalized = [&] (ParamID id) { return synced&&specs[id].time?InhaGrain::Timing::syncNormalized(InhaGrain::Timing::syncIndex(displayed[id],allowTriplets(id)),allowTriplets(id)):displayed[id]; };
+    const auto normalized = [&] (ParamID id) { return synced&&specs[id].time?InhaGrate::Timing::syncNormalized(InhaGrate::Timing::syncIndex(displayed[id],allowTriplets(id)),allowTriplets(id)):displayed[id]; };
     const auto plain = [&] (ParamID id) { return toPlain (id, displayed[id]); };
-    const auto resolvedTime=[&](ParamID id){return synced?InhaGrain::Timing::syncMilliseconds(normalized(id),frameTempo,allowTriplets(id)):plain(id);};
+    const auto resolvedTime=[&](ParamID id){return synced?InhaGrate::Timing::syncMilliseconds(normalized(id),frameTempo,allowTriplets(id)):plain(id);};
     const auto effectiveGrain=[&](ParamID id){
         const auto capped=std::min(resolvedTime(id),resolvedTime(scatter));
         if(!synced)return toNormal(id,capped);
         const auto triplets=allowTriplets(id);
-        const auto floor=InhaGrain::Timing::floorMilliseconds(capped,frameTempo,triplets);
+        const auto floor=InhaGrate::Timing::floorMilliseconds(capped,frameTempo,triplets);
         std::size_t index=0;
-        for(std::size_t i=1;i<InhaGrain::Timing::choiceCount(triplets);++i)
-            if(InhaGrain::Timing::syncMilliseconds(InhaGrain::Timing::syncNormalized(i,triplets),frameTempo,triplets)<=floor+1e-6)index=i;
-        return InhaGrain::Timing::syncNormalized(index,triplets);
+        for(std::size_t i=1;i<InhaGrate::Timing::choiceCount(triplets);++i)
+            if(InhaGrate::Timing::syncMilliseconds(InhaGrate::Timing::syncNormalized(i,triplets),frameTempo,triplets)<=floor+1e-6)index=i;
+        return InhaGrate::Timing::syncNormalized(index,triplets);
     };
     RECT client {};
     GetClientRect (window, &client);
@@ -2113,7 +2113,7 @@ void NativeView::paint (HDC windowDC)
     }
     else
     {
-        trackedText (dc, sectionFont, ink, L"INHA GRAIN",
+        trackedText (dc, sectionFont, ink, L"INHA GRATE",
                      { contentLeft + 10, 0, contentLeft + 145, headerHeight },
                      DT_LEFT, 1);
     }
@@ -2136,7 +2136,7 @@ void NativeView::paint (HDC windowDC)
     GetTextExtentPoint32W(dc,modeName,static_cast<int>(std::wcslen(modeName)),&modeTextSize);SelectObject(dc,previousFont);
     const auto modeTextWidth=static_cast<int>(std::lround(modeTextSize.cx/renderScale));
     const auto groupWidth=19+modeTextWidth;const auto groupLeft=(triggerSelectorRect.left+triggerSelectorRect.right-groupWidth)/2;
-    {Gdiplus::Graphics graphics(dc);inha::grainIcons::draw(graphics,inha::grainIcons::Icon::trigger,
+    {Gdiplus::Graphics graphics(dc);inha::grateIcons::draw(graphics,inha::grateIcons::Icon::trigger,
       scaledReal(static_cast<float>(groupLeft)),scaledReal(7.0f),scaledReal(14.0f),smoothColour(ink));}
     text(dc,smallFont,ink,modeName,{groupLeft+19,1,groupLeft+groupWidth+1,headerHeight+1},DT_CENTER|DT_VCENTER);
     if(synced)fill(dc,syncRect,rangeFill);
@@ -2199,7 +2199,7 @@ void NativeView::paint (HDC windowDC)
       }
       const auto compact=[&](ParamID id){
        const auto effective=grainRange?effectiveGrain(id):normalized(id);
-       auto value=synced&&specs[id].time?std::wstring(InhaGrain::Timing::syncLabel(effective,allowTriplets(id)))
+       auto value=synced&&specs[id].time?std::wstring(InhaGrate::Timing::syncLabel(effective,allowTriplets(id)))
          :displayValue(id,grainRange?std::min(plain(id),plain(scatter)):plain(id));
        if(id==dryLevel||id==wetLevel){const auto space=value.find(L' ');if(space!=std::wstring::npos)value.resize(space);}
        if(c.slider&&specs[id].time&&!synced){
@@ -2222,7 +2222,7 @@ void NativeView::paint (HDC windowDC)
       text(dc,controlValueFont,grainRange&&resolvedTime(hi)>resolvedTime(scatter)+1e-6?pink:primary,second,{c.x-half,c.y+51,c.x+half,c.y+63},DT_CENTER|DT_VCENTER);
     }
     trackedText (dc, footerFont, muted,
-                 L"v" + std::wstring (InhaGrainVersion::wide) + L" \xa9 2026 O. Inha / inha.jp",
+                 L"v" + std::wstring (InhaGrateVersion::wide) + L" \xa9 2026 O. Inha / inha.jp",
                  { contentLeft + 140, controlsBottom, contentRight - 10, baseEditorHeight },
                  DT_RIGHT, 1);
     {
@@ -2501,7 +2501,7 @@ public:
         std::memcpy (info->cid, index == 0 ? componentCID : controllerCID, sizeof (TUID));
         info->cardinality = PClassInfo::kManyInstances;
         copyAscii (info->category, index == 0 ? kVstAudioEffectClass : kVstComponentControllerClass);
-        copyAscii (info->name, index == 0 ? "INHA Grain" : "INHA Grain Controller");
+        copyAscii (info->name, index == 0 ? "INHA Grate" : "INHA Grate Controller");
         return kResultOk;
     }
     tresult PLUGIN_API getClassInfo2 (int32 index, PClassInfo2* info) override
@@ -2512,11 +2512,11 @@ public:
         std::memcpy (info->cid, index == 0 ? componentCID : controllerCID, sizeof (TUID));
         info->cardinality = PClassInfo::kManyInstances;
         copyAscii (info->category, index == 0 ? kVstAudioEffectClass : kVstComponentControllerClass);
-        copyAscii (info->name, index == 0 ? "INHA Grain" : "INHA Grain Controller");
+        copyAscii (info->name, index == 0 ? "INHA Grate" : "INHA Grate Controller");
         info->classFlags = 0;
         copyAscii (info->subCategories, index == 0 ? "Fx|Delay" : "");
         copyAscii (info->vendor, "INHA");
-        copyAscii (info->version, InhaGrainVersion::ascii);
+        copyAscii (info->version, InhaGrateVersion::ascii);
         copyAscii (info->sdkVersion, "VST 3.7");
         return kResultOk;
     }
@@ -2528,10 +2528,10 @@ public:
         std::memcpy (info->cid, index == 0 ? componentCID : controllerCID, sizeof (TUID));
         info->cardinality = PClassInfo::kManyInstances;
         copyAscii (info->category, index == 0 ? kVstAudioEffectClass : kVstComponentControllerClass);
-        copyUtf16 (info->name, index == 0 ? "INHA Grain" : "INHA Grain Controller");
+        copyUtf16 (info->name, index == 0 ? "INHA Grate" : "INHA Grate Controller");
         copyAscii (info->subCategories, index == 0 ? "Fx|Delay" : "");
         copyUtf16 (info->vendor, "INHA");
-        copyUtf16 (info->version, InhaGrainVersion::ascii);
+        copyUtf16 (info->version, InhaGrateVersion::ascii);
         copyUtf16 (info->sdkVersion, "VST 3.7");
         return kResultOk;
     }
